@@ -1,0 +1,30 @@
+{
+    "$schema": "https://go.kicad.org/api/schemas/v1",
+    "identifier": "com.github.jOaSbA.via-stitching",
+    "name": "Via Stitching",
+    "description": "Fill the overlap of two copper zones with stitching vias for a chosen net",
+    "runtime": {
+        "type": "python",
+        "min_version": "3.9"
+    },
+    "actions": [
+        {
+            "identifier": "via-stitch",
+            "name": "Via Stitching",
+            "description": "Stitch ground planes together with a grid of vias",
+            "show-button": true,
+            "scopes": [
+                "pcb"
+            ],
+            "entrypoint": "via_stitching_action.py",
+            "icons-light": [
+                "icon.png",
+                "icon@2x.png"
+            ],
+            "icons-dark": [
+                "icon.png",
+                "icon@2x.png"
+            ]
+        }
+    ]
+}
