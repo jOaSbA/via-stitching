@@ -17,12 +17,13 @@ import wx
 
 from kipy import KiCad
 from kipy.errors import ConnectionError as KiCadConnectionError
-from kipy.board_types import Via, Group, BoardLayer, PadType, PSS_CIRCLE
+from kipy.board_types import Via, BoardLayer, PadType, PSS_CIRCLE
 from kipy.geometry import Vector2
 from kipy.util import from_mm
 
 # Make the sibling helper module importable regardless of how KiCad launches us.
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from _mac_dialog import attach_to_stage_manager, prepare_app  # noqa: E402
 from _win_dialog import get_foreground_hwnd, attach_to_kicad  # noqa: E402
 
 # shapely (plus the numpy and GEOS it drags in) costs about 1.6 s to import,
@@ -177,7 +178,44 @@ def _make_via(x, y, diameter_nm, drill_nm, net):
     return via
 
 
-def stitch(board, net_name, via_dia_mm, drill_mm, spacing_mm, pattern, parent=None):
+def _group_vias(kicad, board, vias, net_name):
+    """Group vias through KiCad's native editor action.
+
+    KiCad 10.0.1 cannot create a Group through ``board.create_items`` (the
+    server silently drops it), even if the member vias were committed first.
+    Selection plus the editor's own Group Items action uses the proven native
+    path and works across KiCad 10 releases.
+    """
+    if not vias:
+        return None
+
+    before_group_ids = {group.id.value for group in board.get_groups()}
+    board.clear_selection()
+    board.add_to_selection(vias)
+    # Grouping moved to the common editor actions in KiCad 10. The old
+    # pcbnew.EditorControl.group name is accepted by run_action as a request but
+    # does nothing, leaving all the vias selected and ungrouped.
+    kicad.run_action("common.Interactive.group")
+
+    new_groups = [
+        group
+        for group in board.get_groups()
+        if group.id.value not in before_group_ids
+    ]
+    if not new_groups:
+        raise RuntimeError("KiCad did not create a group for the stitching vias.")
+
+    group = new_groups[0]
+    # Group.name is read-only in kicad-python 0.7.x, but the inherited public
+    # proto is mutable like the other wrapper types.
+    group.proto.name = f"ViaStitching {net_name}"
+    [group] = board.update_items(group)
+    return group
+
+
+def stitch(
+    kicad, board, net_name, via_dia_mm, drill_mm, spacing_mm, pattern, parent=None
+):
     """Run the stitching. Returns the number of vias placed."""
     from shapely.geometry import Point
     from shapely.prepared import prep
@@ -262,21 +300,8 @@ def stitch(board, net_name, via_dia_mm, drill_mm, spacing_mm, pattern, parent=No
 
     # Bundle every new via into one named group so they delete as a set, while
     # KiCad's native "Remove from Group" still lets you peel out one via.
-    # This must happen AFTER the vias are committed: items in an open commit are
-    # not yet real board items, so a group created in the same commit cannot
-    # resolve them as members (which is why grouping silently did nothing).
     new_vias = [v for v in board.get_vias() if v.id.value not in before_ids]
-    if new_vias:
-        group = Group()
-        group._proto.name = f"ViaStitching {net_name}"
-        group.items = new_vias
-        commit2 = board.begin_commit()
-        try:
-            board.create_items(group)
-            board.push_commit(commit2, "Group stitching vias")
-        except Exception:
-            board.drop_commit(commit2)
-            raise
+    _group_vias(kicad, board, new_vias, net_name)
 
     try:
         board.refill_zones()
@@ -351,6 +376,7 @@ def main():
     foreground_hwnd = get_foreground_hwnd()
 
     app = wx.App()
+    prepare_app()
 
     try:
         kicad = KiCad()
@@ -367,12 +393,12 @@ def main():
 
     net_names = sorted({n.name for n in board.get_nets() if n.name})
 
-    # The plugin runs as its own process, so by default our dialog would show as
-    # a separate taskbar app that can get lost behind KiCad. Owning it to the
-    # KiCad PCB editor window makes it behave like the in-process plugins: no
-    # taskbar button, always on top of KiCad, minimises/restores with it.
+    # The plugin runs as its own process. Give the dialog editor-attached window
+    # behavior: a KiCad-owned tool window on Windows, and a floating window that
+    # joins the PCB editor's Stage Manager set on macOS.
     dlg = ViaStitchingDialog(None, net_names)
     attach_to_kicad(dlg, foreground_hwnd, board)
+    attach_to_stage_manager(dlg)
     dlg.CentreOnScreen()
 
     # Keep the dialog alive (hidden) until the end so every message box can be
@@ -394,7 +420,7 @@ def main():
 
         busy = wx.BusyCursor()
         try:
-            count = stitch(board, parent=dlg, **params)
+            count = stitch(kicad, board, parent=dlg, **params)
         except Exception as exc:  # surface any failure to the user
             del busy
             msg(str(exc), wx.OK | wx.ICON_ERROR)
