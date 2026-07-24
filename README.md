@@ -22,7 +22,7 @@ bindings are gone.
 ### From the Plugin and Content Manager
 
 *Tools > Plugin and Content Manager > Plugins*, find Via Stitching, install it,
-and restart the PCB editor. (Pending acceptance into the official repository.)
+and restart the PCB editor.
 
 ### Manually
 
