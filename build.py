@@ -57,11 +57,14 @@ def main():
     os.makedirs(DIST, exist_ok=True)
     zip_path = os.path.join(DIST, "{}-{}.zip".format(REPO, version))
 
-    # metadata.json that goes *inside* the archive: strip the download_* fields.
+    # metadata.json inside the archive: only the version being packaged, with the
+    # download_* fields stripped. PCM requires the in-package metadata to contain
+    # exactly one version.
     packaged = copy.deepcopy(meta)
-    for v in packaged["versions"]:
-        for k in ("download_url", "download_sha256", "download_size", "install_size"):
-            v.pop(k, None)
+    built = copy.deepcopy(latest)
+    for k in ("download_url", "download_sha256", "download_size", "install_size"):
+        built.pop(k, None)
+    packaged["versions"] = [built]
 
     install_size = 0
     with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
