@@ -1,0 +1,38 @@
+{
+  "$schema": "https://go.kicad.org/pcm/schemas/v1",
+  "name": "Via Stitching",
+  "description": "Stitch copper zones together with a grid of vias on a chosen net",
+  "description_full": "Fills the overlap of a net's copper zones (for example the top and bottom GND pours) with a grid of through vias, stitching the planes together.\n\nBuilt on KiCad's modern IPC API (kicad-python / kipy), so it keeps working on KiCad 11 and later, where the legacy SWIG pcbnew bindings are removed.\n\nFeatures:\n- Hexagonal, square, or staggered via patterns with configurable diameter, drill, and spacing.\n- Vias are placed only where the net is poured on every layer it occupies, inset enough to stay clear of other-net copper.\n- Existing via and pad drill holes are avoided with a hole-to-hole margin.\n- All placed vias are bundled into a single named group so they can be deleted as a set.",
+  "identifier": "com.github.jOaSbA.via-stitching",
+  "type": "plugin",
+  "author": {
+    "name": "jOaSbA",
+    "contact": {
+      "web": "https://github.com/jOaSbA"
+    }
+  },
+  "license": "GPL-3.0",
+  "resources": {
+    "Homepage": "https://github.com/jOaSbA/via-stitching",
+    "Bug Tracker": "https://github.com/jOaSbA/via-stitching/issues"
+  },
+  "tags": [
+    "via",
+    "stitching",
+    "ground",
+    "plane",
+    "zone"
+  ],
+  "versions": [
+    {
+      "version": "1.0.0",
+      "status": "stable",
+      "kicad_version": "10.0",
+      "runtime": "ipc",
+      "download_url": "https://github.com/jOaSbA/via-stitching/releases/download/v1.0.0/via-stitching-1.0.0.zip",
+      "download_sha256": "b1d1ee51d93961c60c1999a8a3650bf74821d028ad28bfc02247997afe1cf2c9",
+      "download_size": 21870,
+      "install_size": 33877
+    }
+  ]
+}
