@@ -12,24 +12,28 @@
 import math
 import os
 import sys
+import traceback
 
 import wx
 
 from kipy import KiCad
-from kipy.errors import ConnectionError as KiCadConnectionError
-from kipy.board_types import Via, BoardLayer, PadType, PSS_CIRCLE
+from kipy.board_types import Group, Via, BoardLayer, PadType, PSS_CIRCLE
 from kipy.geometry import Vector2
 from kipy.util import from_mm
 
-# Make the sibling helper module importable regardless of how KiCad launches us.
+# Make the sibling helper modules importable regardless of how KiCad launches us.
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from _mac_dialog import attach_to_stage_manager, prepare_app  # noqa: E402
-from _win_dialog import get_foreground_hwnd, attach_to_kicad  # noqa: E402
+from _win_dialog import make_tool_window  # noqa: E402
 
-# shapely (plus the numpy and GEOS it drags in) costs about 1.6 s to import,
-# which is most of the plugin's start-up time. We only need it once the user
-# clicks OK, so it's imported lazily inside the geometry functions below instead
-# of at module load. That way the dialog shows up almost immediately.
+VERSION = "1.0.2"
+
+# shapely (plus the numpy and GEOS it drags in) costs about 1.6 s to import, which
+# is most of the plugin's start-up time, so the geometry functions import it lazily.
+
+# kipy defaults to 2 s, which get_zones() or a few hundred vias blow through on a
+# real board. Every miss surfaces as a lost connection mid-edit.
+API_TIMEOUT_MS = 30000
 
 
 # --- Dialog defaults --------------------------------------------------------
@@ -50,6 +54,18 @@ HOLE_MARGIN_MM = 0.25
 
 # Warn before placing more than this many vias (keeps KiCad responsive).
 VIA_COUNT_WARN = 5000
+
+# Environment lines for error reports. Filled in once we know the KiCad version.
+_ENV = []
+
+
+def _kipy_version():
+    try:
+        from importlib.metadata import version
+
+        return version("kicad-python")
+    except Exception:
+        return "unknown"
 
 
 def _polyline_coords(polyline):
@@ -117,7 +133,7 @@ def _keepout_region(board, new_via_radius_nm):
     circles = []
 
     for via in board.get_vias():
-        r = new_via_radius_nm + via.diameter // 2 + margin
+        r = new_via_radius_nm + via.drill_diameter // 2 + margin
         circles.append(Point(via.position.x, via.position.y).buffer(r, quad_segs=8))
 
     for pad in board.get_pads():
@@ -164,59 +180,40 @@ def _grid_points(bounds, spacing_nm, pattern):
 
 def _make_via(x, y, diameter_nm, drill_nm, net):
     """Create a through Via with a valid single-layer PST_NORMAL padstack."""
-    via = Via()  # defaults to VT_THROUGH with PST_NORMAL padstack
-    ps = via.padstack
-    if not ps.copper_layers:
-        # Fresh padstack has no copper layers; add one (PST_NORMAL uses index 0
-        # to describe the via on all copper layers).
-        ps._add_copper_layer(BoardLayer.BL_F_Cu)
-    ps.copper_layers[0].shape = PSS_CIRCLE
+    via = Via()  # defaults to VT_THROUGH with a PST_NORMAL, F_Cu-only padstack
     via.diameter = diameter_nm
     via.drill_diameter = drill_nm
+    via.padstack.copper_layers[0].shape = PSS_CIRCLE
     via.position = Vector2.from_xy(int(x), int(y))
     via.net = net
     return via
 
 
-def _group_vias(kicad, board, vias, net_name):
-    """Group vias through KiCad's native editor action.
+def _group_vias(board, vias, net_name):
+    """Bundle the vias into one named group. Best effort, never raises.
 
-    KiCad 10.0.1 cannot create a Group through ``board.create_items`` (the
-    server silently drops it), even if the member vias were committed first.
-    Selection plus the editor's own Group Items action uses the proven native
-    path and works across KiCad 10 releases.
+    Built on create_items, not the editor's Group Items action. Driving that action
+    over a large selection is what left the new vias out of the canvas view on
+    KiCad 10, and nothing but reopening the board brought them back. It also split
+    one run across four groups, because add_to_selection returns before the
+    selection has crossed KiCad's UI thread, and its only success signal was
+    get_groups(), which raises ApiError if any unrelated group on the board has a
+    dangling member. create_items needs no selection and returns what it made.
     """
     if not vias:
-        return None
-
-    before_group_ids = {group.id.value for group in board.get_groups()}
-    board.clear_selection()
-    board.add_to_selection(vias)
-    # Grouping moved to the common editor actions in KiCad 10. The old
-    # pcbnew.EditorControl.group name is accepted by run_action as a request but
-    # does nothing, leaving all the vias selected and ungrouped.
-    kicad.run_action("common.Interactive.group")
-
-    new_groups = [
-        group
-        for group in board.get_groups()
-        if group.id.value not in before_group_ids
-    ]
-    if not new_groups:
-        raise RuntimeError("KiCad did not create a group for the stitching vias.")
-
-    group = new_groups[0]
-    # Group.name is read-only in kicad-python 0.7.x, but the inherited public
-    # proto is mutable like the other wrapper types.
-    group.proto.name = f"ViaStitching {net_name}"
-    [group] = board.update_items(group)
-    return group
+        return False
+    try:
+        group = Group()
+        # Group.name is read-only in kicad-python 0.7.x, the inherited proto is not.
+        group.proto.name = f"ViaStitching {net_name}"
+        group.items = vias  # stores the member KIIDs, so the vias must exist already
+        return bool(board.create_items(group))
+    except Exception:
+        return False
 
 
-def stitch(
-    kicad, board, net_name, via_dia_mm, drill_mm, spacing_mm, pattern, parent=None
-):
-    """Run the stitching. Returns the number of vias placed."""
+def stitch(board, net_name, via_dia_mm, drill_mm, spacing_mm, pattern, parent=None):
+    """Run the stitching. Returns (vias placed, whether they were grouped)."""
     from shapely.geometry import Point
     from shapely.prepared import prep
 
@@ -258,23 +255,34 @@ def stitch(
             "No room for vias after clearance inset. Try a smaller via diameter."
         )
 
-    # Avoid existing via/pad drill holes.
-    keepout = _keepout_region(board, via_radius_nm)
-    if keepout is not None:
-        region = region.difference(keepout)
-    if region.is_empty:
-        raise RuntimeError("No free area left for stitching vias.")
-
+    # Grid before subtracting the keepout, so "grid too coarse" and "every position
+    # is taken by an existing hole" get different messages. The grid is anchored to
+    # region.bounds, so it is not reproducible run to run.
     prepared = prep(region)
-    points = [
+    candidates = [
         (x, y)
         for (x, y) in _grid_points(region.bounds, spacing_nm, pattern)
         if prepared.contains(Point(x, y))
     ]
+    if not candidates:
+        raise RuntimeError(
+            "No via positions fit inside the overlap of the planes.\n"
+            "Try a smaller spacing or via diameter."
+        )
 
+    # Avoid existing via/pad drill holes.
+    keepout = _keepout_region(board, via_radius_nm)
+    if keepout is None:
+        points = candidates
+    else:
+        blocked = prep(keepout)
+        points = [(x, y) for (x, y) in candidates if not blocked.intersects(Point(x, y))]
     if not points:
         raise RuntimeError(
-            "No via positions fit. Try a smaller spacing or via diameter."
+            f"All {len(candidates)} candidate positions are blocked by existing via "
+            "or pad holes.\n"
+            "These zones look already stitched. Delete the previous stitching vias "
+            "before re-running, or change the spacing."
         )
 
     if len(points) > VIA_COUNT_WARN:
@@ -282,40 +290,51 @@ def stitch(
             f"This will place {len(points)} vias, which may make KiCad slow.\n"
             "Increase the spacing for fewer vias.\n\nPlace them anyway?"
         )
-        if wx.MessageBox(msg, "Many vias", wx.YES_NO | wx.ICON_WARNING, parent) != wx.YES:
-            return 0
+        style = wx.YES_NO | wx.ICON_WARNING | wx.STAY_ON_TOP
+        if wx.MessageBox(msg, "Many vias", style, parent) != wx.YES:
+            return 0, False
 
     vias = [_make_via(x, y, diameter_nm, drill_nm, net) for (x, y) in points]
 
-    # Remember which vias already existed so we can identify the new ones.
-    before_ids = {v.id.value for v in board.get_vias()}
+    # No explicit commit: one create_items call is already one undo step, and an
+    # open commit can be seized or rolled back by anything else touching the editor.
+    created = board.create_items(vias)
+    if len(created) != len(vias):
+        raise RuntimeError(
+            f"KiCad accepted only {len(created)} of the {len(vias)} vias.\n"
+            "Check that the drill is smaller than the via diameter."
+        )
 
-    commit = board.begin_commit()
+    # create_items reports what it echoed back, not what the board kept.
+    placed = board.get_items_by_id([v.id for v in created])
+    if len(placed) != len(created):
+        raise RuntimeError(
+            f"{len(created)} vias were created but only {len(placed)} are on the "
+            "board. Nothing was rolled back, so check the board before saving."
+        )
+
+    grouped = _group_vias(board, created, net_name)
+
+    # Refilling is safe: vias placed this way survive a manual B and an API refill.
+    # block=False because kipy's blocking poll loop never increments its counter, so
+    # a busy KiCad would spin it forever.
     try:
-        board.create_items(vias)
-        board.push_commit(commit, "Via Stitching")
+        board.refill_zones(block=False)
     except Exception:
-        board.drop_commit(commit)
-        raise
-
-    # Bundle every new via into one named group so they delete as a set, while
-    # KiCad's native "Remove from Group" still lets you peel out one via.
-    new_vias = [v for v in board.get_vias() if v.id.value not in before_ids]
-    _group_vias(kicad, board, new_vias, net_name)
-
-    try:
-        board.refill_zones()
-    except KiCadConnectionError:
         pass
 
-    return len(new_vias) if new_vias else len(vias)
+    return len(placed), grouped
 
 
 class ViaStitchingDialog(wx.Dialog):
     """The 'Via Stitching Parameters' input dialog."""
 
     def __init__(self, parent, net_names):
-        super().__init__(parent, title="Via Stitching Parameters")
+        super().__init__(
+            parent,
+            title="Via Stitching Parameters",
+            style=wx.DEFAULT_DIALOG_STYLE | wx.STAY_ON_TOP,
+        )
 
         icon_path = os.path.join(
             os.path.dirname(os.path.abspath(__file__)), "icon.png"
@@ -362,77 +381,175 @@ class ViaStitchingDialog(wx.Dialog):
         self.SetSizerAndFit(outer)
 
     def values(self):
+        """Validated dialog values. ValueError carries a user-facing message."""
+        try:
+            via_dia_mm = float(self.via_dia.GetValue())
+            drill_mm = float(self.drill.GetValue())
+            spacing_mm = float(self.spacing.GetValue())
+        except ValueError:
+            raise ValueError("Via diameter, drill and spacing must be numbers (mm).")
+
+        if min(via_dia_mm, drill_mm, spacing_mm) <= 0:
+            raise ValueError(
+                "Via diameter, drill and spacing must all be greater than zero."
+            )
+        if drill_mm >= via_dia_mm:
+            raise ValueError(
+                f"The drill ({drill_mm} mm) must be smaller than the via diameter "
+                f"({via_dia_mm} mm)."
+            )
+
+        net_name = self.net.GetValue().strip()
+        if not net_name:
+            raise ValueError("Pick the net to stitch.")
+
         return {
-            "via_dia_mm": float(self.via_dia.GetValue()),
-            "drill_mm": float(self.drill.GetValue()),
-            "spacing_mm": float(self.spacing.GetValue()),
-            "net_name": self.net.GetValue().strip(),
+            "via_dia_mm": via_dia_mm,
+            "drill_mm": drill_mm,
+            "spacing_mm": spacing_mm,
+            "net_name": net_name,
             "pattern": PATTERNS[self.pattern.GetSelection()],
         }
 
 
-def main():
-    # Capture the focused window (the PCB editor) before we create any window.
-    foreground_hwnd = get_foreground_hwnd()
+class ErrorDialog(wx.Dialog):
+    """Unexpected-failure report. Selectable, so Ctrl+A and Ctrl+C paste into a bug."""
 
-    app = wx.App()
+    def __init__(self, parent, summary, details):
+        super().__init__(
+            parent,
+            title="Via Stitching Error",
+            size=(660, 420),
+            style=wx.DEFAULT_DIALOG_STYLE | wx.RESIZE_BORDER | wx.STAY_ON_TOP,
+        )
+
+        label = wx.StaticText(self, label=summary)
+        label.Wrap(620)
+
+        text = wx.TextCtrl(
+            self,
+            value=details,
+            style=wx.TE_MULTILINE | wx.TE_READONLY | wx.TE_DONTWRAP,
+        )
+        text.SetFont(wx.Font(wx.FontInfo(9).Family(wx.FONTFAMILY_TELETYPE)))
+
+        outer = wx.BoxSizer(wx.VERTICAL)
+        outer.Add(label, 0, wx.LEFT | wx.RIGHT | wx.TOP, 12)
+        outer.Add(text, 1, wx.EXPAND | wx.ALL, 12)
+        outer.Add(
+            self.CreateButtonSizer(wx.OK), 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, 12
+        )
+        self.SetSizer(outer)
+
+
+def _to_stderr(text):
+    """KiCad 10.0.1+ shows plugin stderr in the editor's notification area."""
+    try:
+        print(text, file=sys.stderr or sys.__stderr__)
+    except Exception:
+        pass
+
+
+def _msg(parent, text, style):
+    """Message box that stays above the PCB editor."""
+    wx.MessageBox(text, "Via Stitching", style | wx.STAY_ON_TOP, parent)
+
+
+def _report(parent, summary, exc):
+    """Show an unexpected failure with everything a bug report needs."""
+    details = "\n".join(
+        [f"{type(exc).__name__}: {exc}", ""] + _ENV + ["", traceback.format_exc()]
+    )
+    _to_stderr(summary + "\n" + details)
+    try:
+        dlg = ErrorDialog(parent, summary, details)
+        try:
+            dlg.ShowModal()
+        finally:
+            dlg.Destroy()
+    except Exception:
+        # No usable wx, so stderr above is all the reporting we get.
+        pass
+
+
+def main():
+    app = wx.App()  # noqa: F841  (must outlive every window below)
     prepare_app()
 
+    _ENV.extend(
+        [
+            f"Via Stitching {VERSION}",
+            f"kicad-python {_kipy_version()}",
+            f"Python {sys.version.split()[0]} on {sys.platform}",
+        ]
+    )
+
     try:
-        kicad = KiCad()
+        kicad = KiCad(timeout_ms=API_TIMEOUT_MS)
         board = kicad.get_board()
-    except KiCadConnectionError:
-        wx.MessageBox(
-            "Could not connect to KiCad.\n\n"
-            "Enable the API server in Preferences > Plugins, and make sure a "
-            "board is open in the PCB editor.",
-            "Via Stitching",
-            wx.OK | wx.ICON_ERROR,
+        try:
+            _ENV.append(f"KiCad {kicad.get_version()}")
+        except Exception:
+            pass
+        net_names = sorted({n.name for n in board.get_nets() if n.name})
+    except Exception as exc:
+        _report(
+            None,
+            "Could not talk to KiCad. Enable the API server in Preferences > "
+            "Plugins, and make sure a board is open in the PCB editor.",
+            exc,
         )
         return
 
-    net_names = sorted({n.name for n in board.get_nets() if n.name})
-
     # The plugin runs as its own process. Give the dialog editor-attached window
-    # behavior: a KiCad-owned tool window on Windows, and a floating window that
-    # joins the PCB editor's Stage Manager set on macOS.
+    # behavior: no taskbar button on Windows, and a floating window that joins the
+    # PCB editor's Stage Manager set on macOS.
     dlg = ViaStitchingDialog(None, net_names)
-    attach_to_kicad(dlg, foreground_hwnd, board)
+    make_tool_window(dlg)
     attach_to_stage_manager(dlg)
     dlg.CentreOnScreen()
 
-    # Keep the dialog alive (hidden) until the end so every message box can be
-    # parented to it and inherit the same owned-window behaviour.
-    def msg(text, style):
-        wx.MessageBox(text, "Via Stitching", style, dlg)
-
+    # The dialog stays visible to the end so every message box has a real parent.
     try:
         if dlg.ShowModal() != wx.ID_OK:
             return
         try:
             params = dlg.values()
-        except ValueError:
-            msg("Via diameter, drill and spacing must be numbers (mm).",
-                wx.OK | wx.ICON_ERROR)
+        except ValueError as exc:
+            _msg(dlg, str(exc), wx.OK | wx.ICON_ERROR)
             return
-
-        dlg.Hide()
+        _ENV.append(
+            "Parameters: " + ", ".join(f"{k}={v}" for k, v in sorted(params.items()))
+        )
 
         busy = wx.BusyCursor()
         try:
-            count = stitch(kicad, board, parent=dlg, **params)
-        except Exception as exc:  # surface any failure to the user
+            count, grouped = stitch(board, parent=dlg, **params)
+        except (RuntimeError, ValueError) as exc:
+            # Conditions we raise ourselves, already worded for the user.
             del busy
-            msg(str(exc), wx.OK | wx.ICON_ERROR)
+            _msg(dlg, str(exc), wx.OK | wx.ICON_ERROR)
+            return
+        except Exception as exc:
+            del busy
+            _report(dlg, "Via Stitching failed while placing vias.", exc)
             return
         del busy
 
         if count:
-            msg(f"Placed {count} stitching vias on net '{params['net_name']}'.",
-                wx.OK | wx.ICON_INFORMATION)
+            text = f"Placed {count} stitching vias on net '{params['net_name']}'."
+            if not grouped:
+                text += (
+                    "\n\nThis KiCad version did not group them, so they delete "
+                    "individually rather than as a set."
+                )
+            _msg(dlg, text, wx.OK | wx.ICON_INFORMATION)
     finally:
         dlg.Destroy()
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except BaseException as exc:  # nothing may exit silently
+        _report(None, "Via Stitching hit an unexpected error.", exc)
