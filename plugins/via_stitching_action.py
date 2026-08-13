@@ -9,6 +9,7 @@
 # Original via-stitching idea: JS Reynaud. This is an independent IPC re-implementation.
 # License: GPL-3.0-or-later
 
+import json
 import math
 import os
 import sys
@@ -17,6 +18,7 @@ import traceback
 import wx
 
 from kipy import KiCad
+from kipy.errors import ConnectionError as KiCadConnectionError
 from kipy.board_types import Group, Via, BoardLayer, PadType, PSS_CIRCLE
 from kipy.geometry import Vector2
 from kipy.util import from_mm
@@ -442,6 +444,86 @@ class ErrorDialog(wx.Dialog):
         self.SetSizer(outer)
 
 
+def _api_enabled_in_config():
+    """Read KiCad's own API setting. True, False, or None if we cannot tell.
+
+    KiCad only binds the API socket while starting up, so "switched off" and
+    "switched on after KiCad launched" both look like a refused connection from
+    here. The setting on disk is what tells them apart.
+    """
+    root = os.environ.get("KICAD_CONFIG_HOME")
+    if not root:
+        if sys.platform == "win32":
+            root = os.path.join(os.environ.get("APPDATA", ""), "kicad")
+        elif sys.platform == "darwin":
+            root = os.path.expanduser("~/Library/Preferences/kicad")
+        else:
+            root = os.path.join(
+                os.environ.get("XDG_CONFIG_HOME") or os.path.expanduser("~/.config"),
+                "kicad",
+            )
+    try:
+        # Version subdirectories, newest first, so KiCad 11 wins over 10.
+        versions = sorted(
+            (d for d in os.listdir(root) if os.path.isdir(os.path.join(root, d))),
+            key=lambda d: [int(p) for p in d.split(".") if p.isdigit()] or [0],
+            reverse=True,
+        )
+        for name in versions:
+            path = os.path.join(root, name, "kicad_common.json")
+            if os.path.exists(path):
+                with open(path, encoding="utf-8") as fh:
+                    return bool(json.load(fh).get("api", {}).get("enable_server"))
+    except Exception:
+        pass
+    return None
+
+
+def _is_dial_failure(exc):
+    """True if this ConnectionError means nothing answered, not that a reply was late.
+
+    kipy raises the same type for both. It phrases a refused socket as "Failed to
+    connect to KiCad", and a late reply as "Error receiving reply from KiCad".
+    """
+    return "Failed to connect" in str(exc)
+
+
+def _connection_help(enabled, dial_failed=True):
+    """Wording for a failed connection, given the API setting on disk.
+
+    kipy raises the same ConnectionError for a refused socket and for a reply
+    timeout. Only the first says anything about the server not running, so the
+    confident advice is gated on dial_failed.
+    """
+    if not dial_failed:
+        return (
+            "KiCad did not reply in time.\n\n"
+            "It is probably busy, for example filling zones. Wait for it to "
+            "finish and run this again."
+        )
+    if enabled is False:
+        # Never mention restarting on its own here: the setting is the real problem.
+        return (
+            "KiCad's API server is switched off.\n\n"
+            "Turn on 'Enable KiCad API' in Preferences > Plugins, then restart "
+            "KiCad. The server is only started while KiCad launches, so the "
+            "setting does not take effect until then."
+        )
+    if enabled is True:
+        return (
+            "KiCad's API server is enabled but not listening.\n\n"
+            "Restart KiCad. The server is only started while KiCad launches, so "
+            "switching it on in Preferences does nothing for an instance that is "
+            "already running.\n\n"
+            "Then open a board in the PCB editor and run this again."
+        )
+    return (
+        "Could not talk to KiCad.\n\n"
+        "Check that 'Enable KiCad API' is on in Preferences > Plugins, restart "
+        "KiCad, and make sure a board is open in the PCB editor."
+    )
+
+
 def _to_stderr(text):
     """KiCad 10.0.1+ shows plugin stderr in the editor's notification area."""
     try:
@@ -492,11 +574,22 @@ def main():
         except Exception:
             pass
         net_names = sorted({n.name for n in board.get_nets() if n.name})
-    except Exception as exc:
+    except KiCadConnectionError as exc:
+        # If kipy's wording ever changes we fall back to the vaguer message rather
+        # than telling someone to restart KiCad for no reason.
         _report(
             None,
-            "Could not talk to KiCad. Enable the API server in Preferences > "
-            "Plugins, and make sure a board is open in the PCB editor.",
+            _connection_help(_api_enabled_in_config(), _is_dial_failure(exc)),
+            exc,
+        )
+        return
+    except Exception as exc:
+        # The server answered, so it is running. Something else went wrong, most
+        # often no board open in the PCB editor.
+        _report(
+            None,
+            "KiCad's API server answered but did not hand over a board.\n\n"
+            "Open a board in the PCB editor and run this again.",
             exc,
         )
         return

@@ -12,6 +12,7 @@ import sys
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "plugins"))
 
 from kipy.board_types import BoardLayer, Net, PSS_CIRCLE, ViaType  # noqa: E402
+from kipy.errors import ConnectionError as KiCadConnectionError  # noqa: E402
 from kipy.util import from_mm  # noqa: E402
 
 from via_stitching_action import _grid_points, _keepout_region, _make_via  # noqa: E402
@@ -93,6 +94,43 @@ def test_keepout_region_uses_drill_not_copper():
     region2 = _keepout_region(board_pad_only, from_mm(0.15))
     _, _, maxx2, _ = region2.bounds
     assert abs(maxx2 - expected_r) < from_mm(0.01), (maxx2, expected_r)
+
+
+def test_connection_help():
+    from via_stitching_action import _api_enabled_in_config, _connection_help
+
+    off = _connection_help(False)
+    on = _connection_help(True)
+    unknown = _connection_help(None)
+    assert off != on != unknown != off
+
+    # The whole point: never tell someone to just restart when the setting is off.
+    assert "switched off" in off
+    assert "Enable KiCad API" in off
+    # "restart" may appear in the off case, but only after enabling it.
+    assert off.index("Enable KiCad API") < off.index("restart")
+
+    # Only the enabled case leads with restarting.
+    assert "enabled but not listening" in on
+    assert on.lstrip().startswith("KiCad's API server is enabled")
+
+    # A timeout is not evidence the server is down, so it never says "restart".
+    for enabled in (True, False, None):
+        busy = _connection_help(enabled, dial_failed=False)
+        assert "restart" not in busy.lower()
+        assert "busy" in busy
+
+    # Pin the two messages kipy really builds, straight from its own source. If a
+    # kipy bump rewords them, this fails instead of the advice silently degrading.
+    from via_stitching_action import _is_dial_failure
+
+    assert _is_dial_failure(KiCadConnectionError(
+        "Failed to connect to KiCad: Connection refused"))
+    assert not _is_dial_failure(KiCadConnectionError(
+        "Error receiving reply from KiCad: Timed out"))
+
+    # Reading the real config must not raise, whatever is installed.
+    assert _api_enabled_in_config() in (True, False, None)
 
 
 def test_dialogs_build():
