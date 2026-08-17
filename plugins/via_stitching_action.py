@@ -19,7 +19,7 @@ import wx
 
 from kipy import KiCad
 from kipy.errors import ConnectionError as KiCadConnectionError
-from kipy.board_types import Group, Via, BoardLayer, PadType, PSS_CIRCLE
+from kipy.board_types import Group, Via, ArcTrack, BoardLayer, PadType, PSS_CIRCLE
 from kipy.geometry import Vector2
 from kipy.util import from_mm
 
@@ -45,6 +45,7 @@ DEFAULT_SPACING_MM = 2.0
 DEFAULT_NET = "GND"
 PATTERNS = ["Hexagonal", "Square", "Staggered"]
 DEFAULT_PATTERN = "Square"
+DEFAULT_AVOID_OTHER_ZONES = True
 
 # Safety margins applied silently (the dialog has no clearance field, by design).
 # A via placed at least (via_radius + EDGE_EPS) inside the zone fill stays clear of
@@ -53,6 +54,10 @@ DEFAULT_PATTERN = "Square"
 EDGE_EPS_MM = 0.05
 # Hole-to-hole margin kept between a new via drill and existing via/pad drills.
 HOLE_MARGIN_MM = 0.25
+# Clearance kept between a new via's copper and existing tracks of other nets.
+# The IPC API has no call for the board's real clearance rules, so this is a
+# fixed stand-in the same way HOLE_MARGIN_MM is, rather than the true value.
+TRACK_MARGIN_MM = 0.2
 
 # Warn before placing more than this many vias (keeps KiCad responsive).
 VIA_COUNT_WARN = 5000
@@ -153,6 +158,61 @@ def _keepout_region(board, new_via_radius_nm):
     return unary_union(circles) if circles else None
 
 
+def _track_keepout_region(board, via_radius_nm, net_name):
+    """Union of clearance areas around other-nets' tracks, on any copper layer.
+
+    A through via's drill spans every copper layer of the board, not just the
+    ones `net_name` happens to be poured on, so a track on a layer the pour
+    never touches (an outer signal layer over an inner GND plane, say) still
+    has to be avoided or the via drills straight through it.
+    """
+    from shapely.geometry import LineString
+    from shapely.ops import unary_union
+
+    margin = from_mm(TRACK_MARGIN_MM)
+    lines = []
+    for track in board.get_tracks():
+        if track.net.name == net_name:
+            continue
+        if isinstance(track, ArcTrack):
+            coords = [
+                (track.start.x, track.start.y),
+                (track.mid.x, track.mid.y),
+                (track.end.x, track.end.y),
+            ]
+        else:
+            coords = [(track.start.x, track.start.y), (track.end.x, track.end.y)]
+        r = via_radius_nm + track.width // 2 + margin
+        lines.append(LineString(coords).buffer(r, quad_segs=8))
+
+    return unary_union(lines) if lines else None
+
+
+def _zone_keepout_region(zones, net_name, via_radius_nm):
+    """Union of clearance areas around other-nets' filled zones, on any layer.
+
+    A through via's drill spans every copper layer, so a filled zone for a
+    different net on a layer `net_name` never pours on (an inner power plane
+    under a GND-poured outer layer, say) still has to be avoided or the via
+    shorts into it.
+    """
+    from shapely.ops import unary_union
+
+    margin = from_mm(TRACK_MARGIN_MM)
+    polys = []
+    for zone in zones:
+        net = zone.net
+        if net is not None and net.name == net_name:
+            continue
+        for shapes in zone.filled_polygons.values():
+            for pwh in shapes:
+                poly = _polygon_with_holes_to_shapely(pwh)
+                if poly is not None:
+                    polys.append(poly.buffer(via_radius_nm + margin, quad_segs=8))
+
+    return unary_union(polys) if polys else None
+
+
 def _grid_points(bounds, spacing_nm, pattern):
     """Yield candidate (x, y) nm points across `bounds` for the given pattern."""
     minx, miny, maxx, maxy = bounds
@@ -214,7 +274,16 @@ def _group_vias(board, vias, net_name):
         return False
 
 
-def stitch(board, net_name, via_dia_mm, drill_mm, spacing_mm, pattern, parent=None):
+def stitch(
+    board,
+    net_name,
+    via_dia_mm,
+    drill_mm,
+    spacing_mm,
+    pattern,
+    avoid_other_zones=DEFAULT_AVOID_OTHER_ZONES,
+    parent=None,
+):
     """Run the stitching. Returns (vias placed, whether they were grouped)."""
     from shapely.geometry import Point
     from shapely.prepared import prep
@@ -229,7 +298,8 @@ def stitch(board, net_name, via_dia_mm, drill_mm, spacing_mm, pattern, parent=No
     if net is None:
         raise RuntimeError(f"Net '{net_name}' not found on the board.")
 
-    regions = _layer_region(board.get_zones(), net_name)
+    zones = board.get_zones()
+    regions = _layer_region(zones, net_name)
     if not regions:
         raise RuntimeError(
             f"No filled copper found for net '{net_name}'.\n"
@@ -272,8 +342,15 @@ def stitch(board, net_name, via_dia_mm, drill_mm, spacing_mm, pattern, parent=No
             "Try a smaller spacing or via diameter."
         )
 
-    # Avoid existing via/pad drill holes.
+    # Avoid existing via/pad drill holes and other-net tracks on any layer.
     keepout = _keepout_region(board, via_radius_nm)
+    track_keepout = _track_keepout_region(board, via_radius_nm, net_name)
+    if track_keepout is not None:
+        keepout = track_keepout if keepout is None else keepout.union(track_keepout)
+    if avoid_other_zones:
+        zone_keepout = _zone_keepout_region(zones, net_name, via_radius_nm)
+        if zone_keepout is not None:
+            keepout = zone_keepout if keepout is None else keepout.union(zone_keepout)
     if keepout is None:
         points = candidates
     else:
@@ -281,10 +358,11 @@ def stitch(board, net_name, via_dia_mm, drill_mm, spacing_mm, pattern, parent=No
         points = [(x, y) for (x, y) in candidates if not blocked.intersects(Point(x, y))]
     if not points:
         raise RuntimeError(
-            f"All {len(candidates)} candidate positions are blocked by existing via "
-            "or pad holes.\n"
-            "These zones look already stitched. Delete the previous stitching vias "
-            "before re-running, or change the spacing."
+            f"All {len(candidates)} candidate positions are blocked by existing "
+            "vias, pads, tracks, or zones of other nets.\n"
+            "If these zones are already stitched, delete the previous vias first. "
+            "Otherwise try a smaller spacing, or untick 'Avoid other nets' zones' "
+            "if that option is what's blocking them."
         )
 
     if len(points) > VIA_COUNT_WARN:
@@ -375,10 +453,14 @@ class ViaStitchingDialog(wx.Dialog):
         add_row("Net Name:", self.net)
         add_row("Pattern:", self.pattern)
 
+        self.avoid_zones = wx.CheckBox(self, label="Avoid other nets' zones")
+        self.avoid_zones.SetValue(DEFAULT_AVOID_OTHER_ZONES)
+
         buttons = self.CreateButtonSizer(wx.OK | wx.CANCEL)
 
         outer = wx.BoxSizer(wx.VERTICAL)
         outer.Add(grid, 1, wx.EXPAND | wx.ALL, 12)
+        outer.Add(self.avoid_zones, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, 12)
         outer.Add(buttons, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, 12)
         self.SetSizerAndFit(outer)
 
@@ -411,6 +493,7 @@ class ViaStitchingDialog(wx.Dialog):
             "spacing_mm": spacing_mm,
             "net_name": net_name,
             "pattern": PATTERNS[self.pattern.GetSelection()],
+            "avoid_other_zones": self.avoid_zones.GetValue(),
         }
 
 
