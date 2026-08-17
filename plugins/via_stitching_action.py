@@ -46,6 +46,9 @@ DEFAULT_NET = "GND"
 PATTERNS = ["Hexagonal", "Square", "Staggered"]
 DEFAULT_PATTERN = "Square"
 DEFAULT_AVOID_OTHER_ZONES = True
+# Off by default: thermal-via arrays under a QFN/BGA ground pad are a common,
+# intentional use of via stitching, so this must not block them by default.
+DEFAULT_AVOID_FOOTPRINTS = False
 
 # Safety margins applied silently (the dialog has no clearance field, by design).
 # A via placed at least (via_radius + EDGE_EPS) inside the zone fill stays clear of
@@ -213,6 +216,37 @@ def _zone_keepout_region(zones, net_name, via_radius_nm):
     return unary_union(polys) if polys else None
 
 
+def _footprint_keepout_region(board, via_radius_nm):
+    """Union of clearance areas around every footprint's bounding box.
+
+    Keeps vias out from under component bodies (BGAs, connectors, anything
+    with fine-pitch leads underneath). This is a mechanical fit concern, not
+    a copper one, so it applies regardless of the footprint's net.
+    """
+    from shapely.geometry import box as shapely_box
+    from shapely.ops import unary_union
+
+    footprints = board.get_footprints()
+    if not footprints:
+        return None
+
+    margin = via_radius_nm + from_mm(TRACK_MARGIN_MM)
+    polys = []
+    for bbox in board.get_item_bounding_box(footprints):
+        if bbox is None:
+            continue
+        polys.append(
+            shapely_box(
+                bbox.pos.x - margin,
+                bbox.pos.y - margin,
+                bbox.pos.x + bbox.size.x + margin,
+                bbox.pos.y + bbox.size.y + margin,
+            )
+        )
+
+    return unary_union(polys) if polys else None
+
+
 def _grid_points(bounds, spacing_nm, pattern):
     """Yield candidate (x, y) nm points across `bounds` for the given pattern."""
     minx, miny, maxx, maxy = bounds
@@ -282,6 +316,7 @@ def stitch(
     spacing_mm,
     pattern,
     avoid_other_zones=DEFAULT_AVOID_OTHER_ZONES,
+    avoid_footprints=DEFAULT_AVOID_FOOTPRINTS,
     parent=None,
 ):
     """Run the stitching. Returns (vias placed, whether they were grouped)."""
@@ -351,6 +386,12 @@ def stitch(
         zone_keepout = _zone_keepout_region(zones, net_name, via_radius_nm)
         if zone_keepout is not None:
             keepout = zone_keepout if keepout is None else keepout.union(zone_keepout)
+    if avoid_footprints:
+        footprint_keepout = _footprint_keepout_region(board, via_radius_nm)
+        if footprint_keepout is not None:
+            keepout = (
+                footprint_keepout if keepout is None else keepout.union(footprint_keepout)
+            )
     if keepout is None:
         points = candidates
     else:
@@ -359,10 +400,10 @@ def stitch(
     if not points:
         raise RuntimeError(
             f"All {len(candidates)} candidate positions are blocked by existing "
-            "vias, pads, tracks, or zones of other nets.\n"
+            "vias, pads, tracks, zones of other nets, or footprints.\n"
             "If these zones are already stitched, delete the previous vias first. "
             "Otherwise try a smaller spacing, or untick 'Avoid other nets' zones' "
-            "if that option is what's blocking them."
+            "or 'Avoid footprints' if one of those is what's blocking them."
         )
 
     if len(points) > VIA_COUNT_WARN:
@@ -456,11 +497,15 @@ class ViaStitchingDialog(wx.Dialog):
         self.avoid_zones = wx.CheckBox(self, label="Avoid other nets' zones")
         self.avoid_zones.SetValue(DEFAULT_AVOID_OTHER_ZONES)
 
+        self.avoid_footprints = wx.CheckBox(self, label="Avoid footprints")
+        self.avoid_footprints.SetValue(DEFAULT_AVOID_FOOTPRINTS)
+
         buttons = self.CreateButtonSizer(wx.OK | wx.CANCEL)
 
         outer = wx.BoxSizer(wx.VERTICAL)
         outer.Add(grid, 1, wx.EXPAND | wx.ALL, 12)
         outer.Add(self.avoid_zones, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, 12)
+        outer.Add(self.avoid_footprints, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, 12)
         outer.Add(buttons, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, 12)
         self.SetSizerAndFit(outer)
 
@@ -494,6 +539,7 @@ class ViaStitchingDialog(wx.Dialog):
             "net_name": net_name,
             "pattern": PATTERNS[self.pattern.GetSelection()],
             "avoid_other_zones": self.avoid_zones.GetValue(),
+            "avoid_footprints": self.avoid_footprints.GetValue(),
         }
 
 

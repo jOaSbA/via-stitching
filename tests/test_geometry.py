@@ -16,6 +16,7 @@ from kipy.errors import ConnectionError as KiCadConnectionError  # noqa: E402
 from kipy.util import from_mm  # noqa: E402
 
 from via_stitching_action import (  # noqa: E402
+    _footprint_keepout_region,
     _grid_points,
     _keepout_region,
     _make_via,
@@ -175,6 +176,32 @@ def test_zone_keepout_region_skips_same_net_blocks_others():
     # through via drills through it regardless of layer.
     assert region.contains(Point(from_mm(12.5), from_mm(2.5)))
     assert not region.contains(Point(from_mm(30.0), from_mm(2.5)))
+
+
+def test_footprint_keepout_region_covers_bounding_box():
+    # Regression: vias must stay clear of a component's footprint bounding
+    # box, independent of net, since this is a mechanical fit concern.
+    from types import SimpleNamespace
+
+    bbox = SimpleNamespace(
+        pos=SimpleNamespace(x=0, y=0),
+        size=SimpleNamespace(x=from_mm(5.0), y=from_mm(5.0)),
+    )
+    board = SimpleNamespace(
+        get_footprints=lambda: [object()],
+        get_item_bounding_box=lambda footprints: [bbox],
+    )
+
+    region = _footprint_keepout_region(board, from_mm(0.3))
+    from shapely.geometry import Point
+
+    assert region.contains(Point(from_mm(2.5), from_mm(2.5)))
+    assert not region.contains(Point(from_mm(20.0), from_mm(20.0)))
+
+    # No footprints on the board: no keepout at all, not an empty geometry
+    # that every later `.union()` call would need to special-case.
+    empty_board = SimpleNamespace(get_footprints=lambda: [])
+    assert _footprint_keepout_region(empty_board, from_mm(0.3)) is None
 
 
 def test_connection_help():
