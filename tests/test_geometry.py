@@ -15,7 +15,14 @@ from kipy.board_types import BoardLayer, Net, PSS_CIRCLE, ViaType  # noqa: E402
 from kipy.errors import ConnectionError as KiCadConnectionError  # noqa: E402
 from kipy.util import from_mm  # noqa: E402
 
-from via_stitching_action import _grid_points, _keepout_region, _make_via  # noqa: E402
+from via_stitching_action import (  # noqa: E402
+    _footprint_keepout_region,
+    _grid_points,
+    _keepout_region,
+    _make_via,
+    _track_keepout_region,
+    _zone_keepout_region,
+)
 
 MM = from_mm(1.0)
 BOX = (0, 0, 10 * MM, 10 * MM)
@@ -94,6 +101,107 @@ def test_keepout_region_uses_drill_not_copper():
     region2 = _keepout_region(board_pad_only, from_mm(0.15))
     _, _, maxx2, _ = region2.bounds
     assert abs(maxx2 - expected_r) < from_mm(0.01), (maxx2, expected_r)
+
+
+def test_track_keepout_region_skips_same_net_blocks_others():
+    # Regression: a through via's drill spans every copper layer, so a track on
+    # a layer the stitched net never pours on must still block placement.
+    from types import SimpleNamespace
+
+    from kipy.board_types import BoardLayer
+
+    same_net_track = SimpleNamespace(
+        net=SimpleNamespace(name="GND"),
+        layer=BoardLayer.BL_F_Cu,
+        start=SimpleNamespace(x=0, y=0),
+        end=SimpleNamespace(x=from_mm(5.0), y=0),
+        width=from_mm(0.2),
+    )
+    other_net_track = SimpleNamespace(
+        net=SimpleNamespace(name="SIG"),
+        layer=BoardLayer.BL_F_Cu,
+        start=SimpleNamespace(x=0, y=from_mm(1.0)),
+        end=SimpleNamespace(x=from_mm(5.0), y=from_mm(1.0)),
+        width=from_mm(0.2),
+    )
+    board = SimpleNamespace(get_tracks=lambda: [same_net_track, other_net_track])
+
+    region = _track_keepout_region(board, from_mm(0.3), "GND")
+    from shapely.geometry import Point
+
+    # On the same net: not a keepout, even directly on the track.
+    assert not region.contains(Point(from_mm(2.5), 0))
+    # On another net: blocked, even off the track's own layer (a through via
+    # passes through it regardless).
+    assert region.contains(Point(from_mm(2.5), from_mm(1.0)))
+    assert not region.contains(Point(from_mm(2.5), from_mm(5.0)))
+
+
+def test_zone_keepout_region_skips_same_net_blocks_others():
+    # Regression: a through via's drill spans every copper layer, so a filled
+    # zone for a different net on a layer `net_name` never pours on (an inner
+    # power plane under a GND-poured outer layer, say) must still block it.
+    from types import SimpleNamespace
+
+    from kipy.board_types import BoardLayer
+
+    def node(x, y):
+        return SimpleNamespace(has_point=True, has_arc=False, point=SimpleNamespace(x=x, y=y))
+
+    def square_pwh(x0, y0, x1, y1):
+        outline = SimpleNamespace(
+            nodes=[node(x0, y0), node(x1, y0), node(x1, y1), node(x0, y1)]
+        )
+        return SimpleNamespace(outline=outline, holes=[])
+
+    same_net_zone = SimpleNamespace(
+        net=SimpleNamespace(name="GND"),
+        filled_polygons={BoardLayer.BL_F_Cu: [square_pwh(0, 0, from_mm(5.0), from_mm(5.0))]},
+    )
+    other_net_zone = SimpleNamespace(
+        net=SimpleNamespace(name="3V3"),
+        filled_polygons={
+            BoardLayer.BL_In1_Cu: [
+                square_pwh(from_mm(10.0), 0, from_mm(15.0), from_mm(5.0))
+            ]
+        },
+    )
+
+    region = _zone_keepout_region([same_net_zone, other_net_zone], "GND", from_mm(0.3))
+    from shapely.geometry import Point
+
+    # Same net: not a keepout, even well inside its own zone.
+    assert not region.contains(Point(from_mm(2.5), from_mm(2.5)))
+    # Other net, on a layer GND never pours on: blocked anyway, since a
+    # through via drills through it regardless of layer.
+    assert region.contains(Point(from_mm(12.5), from_mm(2.5)))
+    assert not region.contains(Point(from_mm(30.0), from_mm(2.5)))
+
+
+def test_footprint_keepout_region_covers_bounding_box():
+    # Regression: vias must stay clear of a component's footprint bounding
+    # box, independent of net, since this is a mechanical fit concern.
+    from types import SimpleNamespace
+
+    bbox = SimpleNamespace(
+        pos=SimpleNamespace(x=0, y=0),
+        size=SimpleNamespace(x=from_mm(5.0), y=from_mm(5.0)),
+    )
+    board = SimpleNamespace(
+        get_footprints=lambda: [object()],
+        get_item_bounding_box=lambda footprints: [bbox],
+    )
+
+    region = _footprint_keepout_region(board, from_mm(0.3))
+    from shapely.geometry import Point
+
+    assert region.contains(Point(from_mm(2.5), from_mm(2.5)))
+    assert not region.contains(Point(from_mm(20.0), from_mm(20.0)))
+
+    # No footprints on the board: no keepout at all, not an empty geometry
+    # that every later `.union()` call would need to special-case.
+    empty_board = SimpleNamespace(get_footprints=lambda: [])
+    assert _footprint_keepout_region(empty_board, from_mm(0.3)) is None
 
 
 def test_connection_help():
