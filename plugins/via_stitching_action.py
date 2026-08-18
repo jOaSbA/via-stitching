@@ -30,7 +30,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from _mac_dialog import attach_to_stage_manager, prepare_app  # noqa: E402
 from _win_dialog import make_tool_window  # noqa: E402
 
-VERSION = "1.0.2"
+VERSION = "1.1.0"
 
 # shapely (plus the numpy and GEOS it drags in) costs the better part of a second
 # to import, more than the rest of start-up together, so the geometry functions
