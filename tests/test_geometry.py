@@ -97,15 +97,31 @@ def test_keepout_shapes_use_drill_not_copper():
     expected_r = from_mm(0.15) + from_mm(0.15) + from_mm(0.25)
     assert abs(maxx - expected_r) < from_mm(0.01), (maxx, expected_r)
 
-    pad = SimpleNamespace(
-        pad_type=PadType.PT_PTH,
-        position=SimpleNamespace(x=0, y=0),
-        padstack=SimpleNamespace(drill=SimpleNamespace(diameter=SimpleNamespace(x=from_mm(0.3)))),
-    )
-    board_pad_only = SimpleNamespace(get_vias=lambda: [], get_pads=lambda: [pad])
+    def pth_pad(drill_x, drill_y):
+        # A real kipy drill diameter is a Vector2, always carrying both axes.
+        return SimpleNamespace(
+            pad_type=PadType.PT_PTH,
+            position=SimpleNamespace(x=0, y=0),
+            padstack=SimpleNamespace(
+                drill=SimpleNamespace(
+                    diameter=SimpleNamespace(x=drill_x, y=drill_y)
+                )
+            ),
+        )
+
+    round_pad = pth_pad(from_mm(0.3), from_mm(0.3))
+    board_pad_only = SimpleNamespace(get_vias=lambda: [], get_pads=lambda: [round_pad])
     shapes2 = _keepout_shapes(board_pad_only, from_mm(0.15))
     _, _, maxx2, _ = shapes2[0].bounds
     assert abs(maxx2 - expected_r) < from_mm(0.01), (maxx2, expected_r)
+
+    # A milled slot is a drill too. Sizing the keepout off the short axis would
+    # leave a via sitting on the far end of the slot.
+    slot_pad = pth_pad(from_mm(0.3), from_mm(3.0))
+    board_slot = SimpleNamespace(get_vias=lambda: [], get_pads=lambda: [slot_pad])
+    _, _, maxx3, _ = _keepout_shapes(board_slot, from_mm(0.15))[0].bounds
+    slot_r = from_mm(0.15) + from_mm(1.5) + from_mm(0.25)
+    assert abs(maxx3 - slot_r) < from_mm(0.01), (maxx3, slot_r)
 
 
 def test_blocked_predicate_without_shapes_blocks_nothing():
@@ -119,17 +135,22 @@ def test_net_clearances_takes_the_larger_netclass_value():
     # signal net that just inherits the board minimum.
     from types import SimpleNamespace
 
-    nets = [SimpleNamespace(name=n) for n in ("GND", "HV", "SIG")]
+    nets = [SimpleNamespace(name=n) for n in ("GND", "HV", "SIG", "ZEROCLASS")]
     classes = {
-        "GND": SimpleNamespace(clearance=from_mm(0.3)),
+        "GND": SimpleNamespace(clearance=from_mm(0.1)),
         "HV": SimpleNamespace(clearance=from_mm(1.5)),
         "SIG": SimpleNamespace(clearance=None),  # inherits the board minimum
+        "ZEROCLASS": SimpleNamespace(clearance=0),  # explicitly zero, not unset
     }
     board = SimpleNamespace(get_netclass_for_nets=lambda n: classes)
 
     clearances = _net_clearances(board, nets, "GND")
     assert clearances["HV"] == from_mm(1.5)
-    assert clearances["SIG"] == from_mm(0.3)  # the stitched net's own value wins
+    # Unset means "inherits the board minimum", which IPC won't tell us: fallback.
+    assert clearances["SIG"] == from_mm(FALLBACK_CLEARANCE_MM)
+    # Zero is a real value, so the stitched net's own clearance is what wins. A
+    # falsy-vs-None mix-up here would hand back the 0.2 mm fallback instead.
+    assert clearances["ZEROCLASS"] == from_mm(0.1)
     # A net KiCad said nothing about still answers, with the fallback.
     assert clearances["NOT_ON_THIS_BOARD"] == from_mm(FALLBACK_CLEARANCE_MM)
 
@@ -289,6 +310,21 @@ def test_connection_help():
     assert _api_enabled_in_config() in (True, False, None)
 
 
+def test_is_busy_recognises_kicads_busy_status():
+    # Pinned against real kipy types: this is how the plugin tells "KiCad is
+    # mid-operation" (usually our own parting refill) from "no board open".
+    from kipy.errors import ApiError
+    from kipy.proto.common import ApiStatusCode
+
+    from via_stitching_action import _is_busy
+
+    assert _is_busy(ApiError("busy", code=ApiStatusCode.AS_BUSY))
+    assert not _is_busy(ApiError("nope", code=ApiStatusCode.AS_BAD_REQUEST))
+    assert not _is_busy(ApiError("default code"))
+    assert not _is_busy(KiCadConnectionError("Failed to connect to KiCad"))
+    assert not _is_busy(RuntimeError("something else entirely"))
+
+
 def test_dialogs_build():
     # The error dialog is the one thing that must never fail, so build it for real.
     import wx
@@ -312,6 +348,11 @@ def test_dialogs_build():
             (dlg.spacing, "-1"),
             (dlg.spacing, "abc"),
             (dlg.drill, "0.6"),  # drill >= via diameter
+            # float() accepts these, and every nan comparison is False, so they
+            # sail past the >0 and drill<diameter checks and die inside from_mm.
+            (dlg.spacing, "nan"),
+            (dlg.via_dia, "nan"),
+            (dlg.spacing, "inf"),
         ):
             good = field.GetValue()
             field.SetValue(bad)

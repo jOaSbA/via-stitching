@@ -19,7 +19,8 @@ from collections import defaultdict
 import wx
 
 from kipy import KiCad
-from kipy.errors import ConnectionError as KiCadConnectionError
+from kipy.errors import ApiError, ConnectionError as KiCadConnectionError
+from kipy.proto.common import ApiStatusCode
 from kipy.board_types import Group, Via, ArcTrack, BoardLayer, PadType, PSS_CIRCLE
 from kipy.geometry import Vector2
 from kipy.util import from_mm
@@ -31,8 +32,9 @@ from _win_dialog import make_tool_window  # noqa: E402
 
 VERSION = "1.0.2"
 
-# shapely (plus the numpy and GEOS it drags in) costs about 1.6 s to import, which
-# is most of the plugin's start-up time, so the geometry functions import it lazily.
+# shapely (plus the numpy and GEOS it drags in) costs the better part of a second
+# to import, more than the rest of start-up together, so the geometry functions
+# import it lazily and the dialog is on screen before any of it is paid.
 
 # kipy defaults to 2 s, which get_zones() or a few hundred vias blow through on a
 # real board. Every miss surfaces as a lost connection mid-edit.
@@ -159,7 +161,12 @@ def _net_clearances(board, nets, net_name):
         return clearances
 
     fallback = from_mm(FALLBACK_CLEARANCE_MM)
-    values = {name: (nc.clearance or fallback) for name, nc in classes.items()}
+    # `is not None`, not `or`: a netclass may legitimately carry an explicit 0,
+    # and only a genuinely unset value means "inherits the board minimum".
+    values = {
+        name: (fallback if nc.clearance is None else nc.clearance)
+        for name, nc in classes.items()
+    }
     own = values.get(net_name, fallback)
     clearances.update({name: max(own, value) for name, value in values.items()})
     return clearances
@@ -201,7 +208,10 @@ def _keepout_shapes(board, via_radius_nm):
         if pad.pad_type not in (PadType.PT_PTH, PadType.PT_NPTH):
             continue
         try:
-            hole_r = pad.padstack.drill.diameter.x // 2
+            # A drill is a Vector2 because it may be a milled slot, so the long
+            # axis is what a round keepout has to cover.
+            drill = pad.padstack.drill.diameter
+            hole_r = max(drill.x, drill.y) // 2
         except Exception:
             hole_r = 0
         if hole_r <= 0:
@@ -592,6 +602,13 @@ class ViaStitchingDialog(wx.Dialog):
         except ValueError:
             raise ValueError("Via diameter, drill and spacing must be numbers (mm).")
 
+        # isfinite first: nan parses fine as a float and then compares False
+        # against everything, so it would slip past both checks below and only
+        # blow up later, inside from_mm().
+        if not all(math.isfinite(v) for v in (via_dia_mm, drill_mm, spacing_mm)):
+            raise ValueError(
+                "Via diameter, drill and spacing must be real numbers (mm)."
+            )
         if min(via_dia_mm, drill_mm, spacing_mm) <= 0:
             raise ValueError(
                 "Via diameter, drill and spacing must all be greater than zero."
@@ -691,6 +708,28 @@ def _is_dial_failure(exc):
     return "Failed to connect" in str(exc)
 
 
+def _is_busy(exc):
+    """True if KiCad refused the call because it is mid-operation.
+
+    This plugin's own parting refill_zones(block=False) is the usual cause: KiCad
+    answers AS_BUSY to everything until that fill finishes, so a second run
+    started too soon fails on its very first call, board open or not.
+    """
+    return isinstance(exc, ApiError) and exc.code == ApiStatusCode.AS_BUSY
+
+
+BUSY_HELP = (
+    "KiCad is busy and refused the request.\n\n"
+    "It is most likely still refilling the zones from a previous run. Wait for "
+    "the PCB editor to go idle, then run this again."
+)
+
+NO_BOARD_HELP = (
+    "KiCad's API server answered but did not hand over a board.\n\n"
+    "Open a board in the PCB editor and run this again."
+)
+
+
 def _connection_help(enabled, dial_failed=True):
     """Wording for a failed connection, given the API setting on disk.
 
@@ -787,14 +826,9 @@ def main():
         )
         return
     except Exception as exc:
-        # The server answered, so it is running. Something else went wrong, most
-        # often no board open in the PCB editor.
-        _report(
-            None,
-            "KiCad's API server answered but did not hand over a board.\n\n"
-            "Open a board in the PCB editor and run this again.",
-            exc,
-        )
+        # The server answered, so it is running. Something else went wrong: KiCad
+        # still busy with our own parting zone refill, or no board open.
+        _report(None, BUSY_HELP if _is_busy(exc) else NO_BOARD_HELP, exc)
         return
 
     # The plugin runs as its own process. Give the dialog editor-attached window
@@ -828,7 +862,11 @@ def main():
             return
         except Exception as exc:
             del busy
-            _report(dlg, "Via Stitching failed while placing vias.", exc)
+            _report(
+                dlg,
+                BUSY_HELP if _is_busy(exc) else "Via Stitching failed while placing vias.",
+                exc,
+            )
             return
         del busy
 
@@ -836,8 +874,8 @@ def main():
             text = f"Placed {count} stitching vias on net '{params['net_name']}'."
             if not grouped:
                 text += (
-                    "\n\nThis KiCad version did not group them, so they delete "
-                    "individually rather than as a set."
+                    "\n\nKiCad would not group them, so they delete individually "
+                    "rather than as a set. The vias themselves are fine."
                 )
             _msg(dlg, text, wx.OK | wx.ICON_INFORMATION)
     finally:
