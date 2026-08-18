@@ -15,8 +15,11 @@ import os
 import sys
 import traceback
 from collections import defaultdict
-
+import json
+import re
+from pathlib import Path
 import wx
+import wx.adv
 
 from kipy import KiCad
 from kipy.errors import ApiError, ConnectionError as KiCadConnectionError
@@ -24,6 +27,13 @@ from kipy.proto.common import ApiStatusCode
 from kipy.board_types import Group, Via, ArcTrack, BoardLayer, PadType, PSS_CIRCLE
 from kipy.geometry import Vector2
 from kipy.util import from_mm
+from kipy.proto.board.board_types_pb2 import ViaType
+from kipy.util.board_layer import is_copper_layer, canonical_name
+from kipy.board_types import Via
+from kipy.proto.common.types import KiCadObjectType
+from kipy.util.units import to_mm, from_mm
+from kipy.util.board_layer import is_copper_layer, iter_copper_layers
+from kipy.proto.board.board_types_pb2 import BoardLayer as BL
 
 # Make the sibling helper modules importable regardless of how KiCad launches us.
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -58,6 +68,7 @@ DEFAULT_AVOID_OTHER_ZONES = False
 # intentional use of via stitching, so this must not block them by default.
 DEFAULT_AVOID_FOOTPRINTS = False
 
+
 # Safety margins applied silently (the dialog has no clearance field, by design).
 # The inset keeps a via at least (via_radius + EDGE_EPS) inside the fill on every
 # layer the net is poured on, where KiCad has already pulled the fill back by the
@@ -77,7 +88,6 @@ VIA_COUNT_WARN = 5000
 # Environment lines for error reports. Filled in once we know the KiCad version.
 _ENV = []
 
-
 def _kipy_version():
     try:
         from importlib.metadata import version
@@ -86,6 +96,59 @@ def _kipy_version():
     except Exception:
         return "unknown"
 
+
+# KiCad default theme copper colors (fallback)
+_DEFAULT_COPPER = {
+    "f": (200, 52, 52), "in1": (127, 200, 127), "in2": (206, 125, 66),
+    "in3": (79, 203, 203), "in4": (219, 98, 139), "in5": (167, 165, 198),
+    "in6": (40, 204, 217), "b": (77, 127, 196),
+}
+
+# KiCad default theme copper colors (fallback)
+_DEFAULT_COPPER = {
+    "f": (200, 52, 52), "in1": (127, 200, 127), "in2": (206, 125, 66),
+    "in3": (79, 203, 203), "in4": (219, 98, 139), "in5": (167, 165, 198),
+    "in6": (40, 204, 217), "b": (77, 127, 196),
+}
+
+def _copper_key_to_layer(key):
+    if key == "f":
+        return BL.BL_F_Cu
+    if key == "b":
+        return BL.BL_B_Cu
+    m = re.match(r"in(\d+)$", key)
+    return getattr(BL, f"BL_In{m.group(1)}_Cu", None) if m else None
+
+def _layer_colors():
+    """{BoardLayer: (r, g, b)} from the active KiCad color theme, with fallbacks."""
+    copper = dict(_DEFAULT_COPPER)
+    try:
+        cfg = Path.home() / ".config/kicad/10.0"
+        theme = json.loads((cfg / "pcbnew.json").read_text())["appearance"]["color_theme"]
+        data = json.loads((cfg / "colors" / f"{theme}.json").read_text())
+        for key, val in data.get("board", {}).get("copper", {}).items():
+            m = re.match(r"rgba?\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)", val)
+            if m:
+                copper[key.lower()] = tuple(map(int, m.groups()))
+    except Exception:
+        pass  # built-in theme or unreadable config: defaults stand
+    out = {}
+    for key, rgb in copper.items():
+        layer = _copper_key_to_layer(key)
+        if layer is not None:
+            out[layer] = rgb
+    return out
+
+def _color_swatch(rgb, size=14):
+    bmp = wx.Bitmap(size, size)
+    dc = wx.MemoryDC(bmp)
+    dc.SetBackground(wx.Brush(wx.Colour(*rgb)))
+    dc.Clear()
+    dc.SetPen(wx.Pen(wx.Colour(90, 90, 90)))
+    dc.SetBrush(wx.TRANSPARENT_BRUSH)
+    dc.DrawRectangle(0, 0, size, size)
+    dc.SelectObject(wx.NullBitmap)
+    return bmp
 
 def _polyline_coords(polyline):
     """Convert a kipy PolyLine into a list of (x, y) nm tuples for shapely.
@@ -123,19 +186,33 @@ def _polygon_with_holes_to_shapely(pwh):
     return poly if (not poly.is_empty) else None
 
 
+def _span_layers(board, start_layer, end_layer):
+    """All enabled copper layers between start and end, inclusive, in stackup order."""
+    enabled = set(board.get_enabled_layers())
+    order = [l for l in iter_copper_layers() if l in enabled]
+    i, j = order.index(start_layer), order.index(end_layer)
+    if i > j:
+        i, j = j, i          # user may have picked them "upside down"
+    return order[i:j + 1]
+
+
 def _layer_region(zones, net_name):
     """Return {layer: shapely geometry} of the filled copper of `net_name`."""
     from shapely.ops import unary_union
 
     per_layer = {}
     for zone in zones:
+        if zone.is_rule_area():
+            continue
         net = zone.net
         if net is None or net.name != net_name:
             continue
         for layer, shapes in zone.filled_polygons.items():
             for pwh in shapes:
                 poly = _polygon_with_holes_to_shapely(pwh)
-                if poly is not None:
+                if poly is not None and not poly.is_empty:
+                    if not poly.is_valid:
+                        poly = poly.buffer(0)   # repair rare self-intersections
                     per_layer.setdefault(layer, []).append(poly)
     return {layer: unary_union(polys) for layer, polys in per_layer.items()}
 
@@ -190,17 +267,25 @@ def _blocked_predicate(shapes):
     return lambda x, y: len(tree.query(Point(x, y), predicate="intersects")) > 0
 
 
-def _keepout_shapes(board, via_radius_nm):
+def _keepout_shapes(board, via_radius_nm, span):
     """Drill keepouts around existing vias and through-hole pads.
-
     Prevents new stitching vias from violating hole-to-hole clearance.
     """
     from shapely.geometry import Point
 
     margin = from_mm(HOLE_MARGIN_MM)
+    span_set = set(span)
     circles = []
 
     for via in board.get_vias():
+
+        try:
+            via_span = set(_span_layers(board, via.padstack.drill.start_layer, via.padstack.drill.end_layer))
+        except ValueError:
+            via_span = span_set  # unknown span: be conservative, treat as blocking
+        if not (via_span & span_set):
+            continue
+
         r = via_radius_nm + via.drill_diameter // 2 + margin
         circles.append(Point(via.position.x, via.position.y).buffer(r, quad_segs=8))
 
@@ -336,20 +421,22 @@ def _footprint_keepout_shapes(board, net_name, via_radius_nm, clearances):
         for bbox in boxes
     ]
 
-
 def _grid_points(bounds, spacing_nm, pattern):
-    """Yield candidate (x, y) nm points across `bounds` for the given pattern."""
+    """Yield candidate (x, y) nm points across `bounds` for the given pattern.
+
+    The grid is anchored to `bounds`, so the user controls placement via the
+    region itself (and the X/Y offset parameters). Positions are therefore
+    not reproducible across runs if the region's bounding box changes.
+    """
     minx, miny, maxx, maxy = bounds
     minx, miny = int(math.floor(minx)), int(math.floor(miny))
     maxx, maxy = int(math.ceil(maxx)), int(math.ceil(maxy))
-
     if pattern == "Hexagonal":
-        row_pitch = int(spacing_nm * math.sqrt(3) / 2)
+        row_pitch = round(spacing_nm * math.sqrt(3) / 2)
     else:
         row_pitch = spacing_nm
-    if row_pitch <= 0:
+    if row_pitch <= 0 or spacing_nm <= 0:
         return
-
     row = 0
     y = miny
     while y <= maxy:
@@ -364,9 +451,12 @@ def _grid_points(bounds, spacing_nm, pattern):
         row += 1
 
 
-def _make_via(x, y, diameter_nm, drill_nm, net):
+def _make_via(x, y, via_type, start_layer, end_layer, diameter_nm, drill_nm, net):
     """Create a through Via with a valid single-layer PST_NORMAL padstack."""
     via = Via()  # defaults to VT_THROUGH with a PST_NORMAL, F_Cu-only padstack
+    via.type = via_type
+    via.padstack.drill.start_layer = start_layer
+    via.padstack.drill.end_layer = end_layer
     via.diameter = diameter_nm
     via.drill_diameter = drill_nm
     via.padstack.copper_layers[0].shape = PSS_CIRCLE
@@ -375,7 +465,7 @@ def _make_via(x, y, diameter_nm, drill_nm, net):
     return via
 
 
-def _group_vias(board, vias, net_name):
+def _group_vias(board, vias, net_name, start_layer, end_layer):
     """Bundle the vias into one named group. Best effort, never raises.
 
     Built on create_items, not the editor's Group Items action. Driving that action
@@ -386,12 +476,13 @@ def _group_vias(board, vias, net_name):
     get_groups(), which raises ApiError if any unrelated group on the board has a
     dangling member. create_items needs no selection and returns what it made.
     """
+
     if not vias:
         return False
     try:
         group = Group()
         # Group.name is read-only in kicad-python 0.7.x, the inherited proto is not.
-        group.proto.name = f"ViaStitching {net_name}"
+        group.proto.name = f"ViaStitching {net_name} {start_layer}:{end_layer}"
         group.items = vias  # stores the member KIIDs, so the vias must exist already
         return bool(board.create_items(group))
     except Exception:
@@ -399,24 +490,25 @@ def _group_vias(board, vias, net_name):
 
 
 def stitch(
-    board,
-    net_name,
-    via_dia_mm,
-    drill_mm,
-    spacing_mm,
-    pattern,
-    avoid_other_zones=DEFAULT_AVOID_OTHER_ZONES,
-    avoid_footprints=DEFAULT_AVOID_FOOTPRINTS,
-    parent=None,
-):
+    board, via_type, start_layer, end_layer, net_name, via_dia_mm, drill_mm, spacing_mm, pattern, 
+    x_offset_mm, y_offset_mm, 
+    avoid_other_zones=DEFAULT_AVOID_OTHER_ZONES, avoid_footprints=DEFAULT_AVOID_FOOTPRINTS, parent=None):
+
     """Run the stitching. Returns (vias placed, whether they were grouped)."""
     from shapely.geometry import Point
     from shapely.prepared import prep
+
+    # via_type = via_type
+    # start_layer = start_layer
+    # end_layer = end_layer
 
     diameter_nm = from_mm(via_dia_mm)
     drill_nm = from_mm(drill_mm)
     spacing_nm = from_mm(spacing_mm)
     via_radius_nm = diameter_nm // 2
+
+    x_offset_nm = from_mm(x_offset_mm)
+    y_offset_nm = from_mm(y_offset_mm)
 
     # Resolve the real Net object (carries the proper proto for assignment).
     nets = board.get_nets()
@@ -431,19 +523,34 @@ def stitch(
             f"No filled copper found for net '{net_name}'.\n"
             "Fill the zones first (press B in the PCB editor), then run again."
         )
-    if len(regions) < 2:
-        only = BoardLayer.Name(next(iter(regions)))
+
+    span = _span_layers(board, start_layer, end_layer)
+
+    # The via must land on the net's copper on the two layers it connects.
+    missing = [l for l in (start_layer, end_layer) if l not in regions]
+    if missing:
+        names = ", ".join(board.get_layer_name(l) for l in missing)
         raise RuntimeError(
-            f"Net '{net_name}' only has filled copper on one layer ({only}).\n"
-            "Via stitching needs the net poured on at least two layers."
+            f"Net '{net_name}' has no filled copper on: {names}.\n"
+            "Pick start/end layers where the net is poured, or fill the zones "
+            "first (press B in the PCB editor)."
         )
 
-    # Region where a through via lands on copper on every layer the net is poured.
-    region = None
-    for geom in regions.values():
-        region = geom if region is None else region.intersection(geom)
-    if region is None or region.is_empty:
-        raise RuntimeError("The selected net's planes do not overlap anywhere.")
+    region = regions[start_layer].intersection(regions[end_layer])
+
+    # Intermediate layers inside the span: where this net is poured there too,
+    # keep the via on that copper (the barrel connects those layers as well).
+    # Layers in the span where the net is NOT poured are left to DRC: the barrel
+    # passing through another net's copper there is not checked here.
+    for layer in span:
+        if layer in regions and layer not in (start_layer, end_layer):
+            region = region.intersection(regions[layer])
+
+    if region.is_empty:
+        raise RuntimeError(
+            "The selected net's planes do not overlap anywhere on the "
+            "selected layer span."
+        )
 
     # Inset so the via body + clearance ring stay inside the fill on all layers.
     inset = via_radius_nm + from_mm(EDGE_EPS_MM)
@@ -472,16 +579,24 @@ def stitch(
     # index. Avoid existing via/pad drill holes and other nets' tracks on any
     # layer, plus whatever else the dialog asked for.
     clearances = _net_clearances(board, nets, net_name)
-    keepout = _keepout_shapes(board, via_radius_nm)
+    keepout = _keepout_shapes(board, via_radius_nm, span)
     keepout += _rule_area_keepout_shapes(zones, via_radius_nm)
     keepout += _track_keepout_shapes(board, net_name, via_radius_nm, clearances)
+
     if avoid_other_zones:
         keepout += _zone_keepout_shapes(zones, net_name, via_radius_nm, clearances)
+
     if avoid_footprints:
         keepout += _footprint_keepout_shapes(board, net_name, via_radius_nm, clearances)
 
     blocked = _blocked_predicate(keepout)
-    points = [(x, y) for (x, y) in candidates if not blocked(x, y)]
+
+    points = [
+        (ox, oy)
+        for (ox, oy) in ((x + x_offset_nm, y + y_offset_nm) for (x, y) in candidates)
+        if prepared.contains(Point(ox, oy)) and not blocked(ox, oy)
+    ]
+
     if not points:
         # Only name the optional keepouts that are actually switched on, so this
         # never sends someone off to untick a box that is already off.
@@ -516,7 +631,7 @@ def stitch(
         if wx.MessageBox(msg, "Many vias", style, parent) != wx.YES:
             return 0, False
 
-    vias = [_make_via(x, y, diameter_nm, drill_nm, net) for (x, y) in points]
+    vias = [_make_via(x, y, via_type, start_layer, end_layer, diameter_nm, drill_nm, net) for (x, y) in points]
 
     # No explicit commit: one create_items call is already one undo step, and an
     # open commit can be seized or rolled back by anything else touching the editor.
@@ -535,7 +650,7 @@ def stitch(
             "board. Nothing was rolled back, so check the board before saving."
         )
 
-    grouped = _group_vias(board, created, net_name)
+    grouped = _group_vias(board, created, net_name, start_layer, end_layer)
 
     # Refilling is safe: vias placed this way survive a manual B and an API refill.
     # block=False because kipy's blocking poll loop never increments its counter, so
@@ -564,38 +679,121 @@ class ViaStitchingDialog(wx.Dialog):
         if os.path.exists(icon_path):
             self.SetIcon(wx.Icon(icon_path, wx.BITMAP_TYPE_PNG))
 
-        grid = wx.FlexGridSizer(5, 2, 8, 10)
-        grid.AddGrowableCol(1, 1)
+        board = KiCad().get_board()
+
+        enabled = set(board.get_enabled_layers())
+        copper_layer_ids = [l for l in iter_copper_layers() if l in enabled]
+        self.layer_map   = {board.get_layer_name(l): l for l in copper_layer_ids}
+        self.layer_names = {v: k for k, v in self.layer_map.items()}
+        copper_layer_names = list(self.layer_map.keys())
+        layer_colors = _layer_colors()
+
+
+        self.VIA_TYPE_CHOICES = {
+            "Through":      ViaType.VT_THROUGH,
+            "Micro":        ViaType.VT_MICRO,
+            "Blind/Buried": ViaType.VT_BLIND_BURIED,
+            "Blind":        ViaType.VT_BLIND,
+            "Buried":       ViaType.VT_BURIED,
+        }
+
+        self.VIA_TYPE_NAMES = {v: k for k, v in self.VIA_TYPE_CHOICES.items()}   # int -> name
+
+        selected_vias = board.get_selection(KiCadObjectType.KOT_PCB_VIA)
+        # selected_vias = board.get_selection(Via)
+        sample_via = None
+        if selected_vias:
+            sample_via = selected_vias[0]
+            sample_via_type_name = self.VIA_TYPE_CHOICES.get(sample_via.type, "Unknown")
+            sample_via_start_layer = sample_via.padstack.drill.start_layer
+            sample_via_end_layer = sample_via.padstack.drill.end_layer
+            sample_via_net = sample_via.net
+            sample_via_net_name = sample_via_net.name
+            sample_via_diameter = sample_via.diameter
+            sample_via_drill = sample_via.drill_diameter
+
+        grid = wx.FlexGridSizer(cols=2, vgap=5, hgap=5)
+        grid.AddGrowableCol(1)
 
         def add_row(label, ctrl):
-            grid.Add(
-                wx.StaticText(self, label=label),
-                0,
-                wx.ALIGN_CENTER_VERTICAL,
-            )
+            grid.Add(wx.StaticText(self, label=label), 0, wx.ALIGN_CENTER_VERTICAL)
             grid.Add(ctrl, 1, wx.EXPAND)
 
-        self.via_dia = wx.TextCtrl(self, value=str(DEFAULT_VIA_DIAMETER_MM))
-        self.drill = wx.TextCtrl(self, value=str(DEFAULT_DRILL_MM))
-        self.spacing = wx.TextCtrl(self, value=str(DEFAULT_SPACING_MM))
+        via_types = list(self.VIA_TYPE_CHOICES.keys())
+        self.via_type = wx.Choice(self, choices=via_types)
+        if sample_via:
+            self.via_type.SetStringSelection(self.VIA_TYPE_NAMES.get(sample_via.type))
+        else:
+            self.via_type.SetSelection(0)
 
-        names = list(net_names)
-        self.net = wx.ComboBox(self, choices=names, style=wx.CB_DROPDOWN)
-        if DEFAULT_NET in names:
-            self.net.SetValue(DEFAULT_NET)
-        elif names:
-            self.net.SetSelection(0)
+        def _layer_combo():
+            combo = wx.adv.BitmapComboBox(self, style=wx.CB_READONLY)
+            for name in copper_layer_names:
+                rgb = layer_colors.get(self.layer_map[name], (128, 128, 128))
+                combo.Append(name, _color_swatch(rgb))
+            return combo
+
+        self.start_layer = _layer_combo()
+        if sample_via:
+            self.start_layer.SetStringSelection(self.layer_names[sample_via_start_layer])
+        else:
+            self.start_layer.SetSelection(0)
+        self.end_layer = _layer_combo()
+        if sample_via:
+            self.end_layer.SetStringSelection(self.layer_names[sample_via_end_layer])
+        else:
+            self.end_layer.SetSelection(len(copper_layer_names) - 1)
+
+        # self.start_layer = wx.Choice(self, choices=copper_layer_names)
+        # if sample_via:
+        #     self.start_layer.SetStringSelection(self.layer_names[sample_via_start_layer])
+        # else:
+        #     self.start_layer.SetSelection(0)
+
+        # self.end_layer = wx.Choice(self, choices=copper_layer_names)
+        # if sample_via:
+        #     self.end_layer.SetStringSelection(self.layer_names[sample_via_end_layer])
+        # else:
+        #     self.end_layer.SetSelection(len(copper_layer_names) - 1)
+
+        if sample_via:
+            via_dia_mm_str = str(to_mm(sample_via.diameter))
+            viar_drill_mm_str = str(to_mm(sample_via.drill_diameter))
+            spacing_mm_str = str(to_mm(sample_via.diameter * 4))
+        else:
+            via_dia_mm_str = str(DEFAULT_VIA_DIAMETER_MM)
+            viar_drill_mm_str = str(DEFAULT_DRILL_MM)
+            spacing_mm_str = str(DEFAULT_SPACING_MM)
+
+        self.via_dia = wx.TextCtrl(self, value=via_dia_mm_str)
+        self.drill = wx.TextCtrl(self, value=viar_drill_mm_str)
+        self.spacing = wx.TextCtrl(self, value=spacing_mm_str)
 
         self.pattern = wx.Choice(self, choices=PATTERNS)
         self.pattern.SetSelection(PATTERNS.index(DEFAULT_PATTERN))
 
-        add_row("Via Diameter (mm):", self.via_dia)
-        add_row("Drill (mm):", self.drill)
-        add_row("Spacing (mm):", self.spacing)
-        add_row("Net Name:", self.net)
-        add_row("Pattern:", self.pattern)
+        # if sample via layer starts in an odd layer then it starts with an offset
+        if sample_via and sample_via_start_layer % 2 == 0:
+            x_offset_mm_str = str(to_mm(sample_via.diameter * 2))
+            y_offset_mm_str = str(to_mm(sample_via.diameter * 2))
+        else:
+            x_offset_mm_str = str(to_mm(0.0))
+            y_offset_mm_str = str(to_mm(0.0))
 
-        self.avoid_zones = wx.CheckBox(self, label="Avoid other nets' zones")
+        self.x_offset = wx.TextCtrl(self, value=x_offset_mm_str)
+        self.y_offset = wx.TextCtrl(self, value=y_offset_mm_str)
+
+        names = list(net_names)
+        self.net = wx.ComboBox(self, choices=names, style=wx.CB_DROPDOWN)
+        if sample_via:
+            self.net.SetValue(sample_via_net_name)
+        else:
+            if DEFAULT_NET in names:
+                self.net.SetValue(DEFAULT_NET)
+            elif names:
+                self.net.SetSelection(0)
+
+        self.avoid_zones = wx.CheckBox(self, label="Avoid zones of other nets")
         self.avoid_zones.SetValue(DEFAULT_AVOID_OTHER_ZONES)
         self.avoid_zones.SetToolTip(
             "Keep vias out of other nets' filled copper on every layer.\n\n"
@@ -616,23 +814,78 @@ class ViaStitchingDialog(wx.Dialog):
             "is a normal use of via stitching, and this would block it."
         )
 
-        buttons = self.CreateButtonSizer(wx.OK | wx.CANCEL)
+        self.main_sizer = wx.BoxSizer(wx.VERTICAL)
+
+        self._make_group(self.main_sizer, "", [
+            ("Via Type:", self.via_type),
+            ("Start Layer:", self.start_layer),
+            ("End Layer:", self.end_layer),
+            ("Via Diameter (mm):", self.via_dia),
+            ("Drill (mm):", self.drill)
+        ])
+
+        self._make_group(self.main_sizer, "", [
+            ("Via Pattern:", self.pattern),
+            ("Spacing (mm):", self.spacing),
+            ("X-Offset (mm):", self.x_offset),
+            ("Y-Offset (mm):", self.y_offset),
+            ("Zones:", self.avoid_zones),
+            ("Footprints:", self.avoid_footprints)
+        ])
+
+        self._make_group(self.main_sizer, "", [
+            ("Net Name:", self.net)
+        ])
+
+
+
+        btn_ok = wx.Button(self, wx.ID_OK)
+        btn_cancel = wx.Button(self, wx.ID_CANCEL)
+
+        btns = wx.BoxSizer(wx.HORIZONTAL)
+        btns.AddStretchSpacer(1)
+        btns.Add(btn_cancel, 0)
+        btns.AddSpacer(20)
+        btns.Add(btn_ok, 0)
+        btns.AddSpacer(5)
+
+        self.main_sizer.AddSpacer(15)
+        self.main_sizer.Add(btns, 0, wx.EXPAND)
 
         outer = wx.BoxSizer(wx.VERTICAL)
-        outer.Add(grid, 1, wx.EXPAND | wx.ALL, 12)
-        outer.Add(self.avoid_zones, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, 12)
-        outer.Add(self.avoid_footprints, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, 12)
-        outer.Add(buttons, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, 12)
+        outer.Add(self.main_sizer, 1, wx.EXPAND | wx.ALL, 8)
         self.SetSizerAndFit(outer)
+
+    def _make_group(self, parent_sizer, title, rows):
+        """rows: list of (label, control) pairs."""
+        box = wx.StaticBoxSizer(wx.VERTICAL, self, title)
+        grid = wx.FlexGridSizer(0, 2, 5, 5)     # rows grow, 2 cols
+        grid.AddGrowableCol(1)
+        for label, ctrl in rows:
+            grid.Add(wx.StaticText(self, label=label), 0, wx.ALIGN_CENTER_VERTICAL)
+            grid.Add(ctrl, 1, wx.EXPAND)
+        box.Add(grid, 1, wx.EXPAND | wx.ALL, 5)
+        parent_sizer.Add(box, 0, wx.EXPAND | wx.ALL, 5)
+
 
     def values(self):
         """Validated dialog values. ValueError carries a user-facing message."""
+
+        via_type = self.VIA_TYPE_CHOICES[self.via_type.GetStringSelection()]
+        start_layer = self.layer_map[self.start_layer.GetStringSelection()]
+        end_layer = self.layer_map[self.end_layer.GetStringSelection()]
+
+        if start_layer == end_layer:
+            raise ValueError(f"Start and end layers must not be the same ({start_layer})")
+
         try:
             via_dia_mm = float(self.via_dia.GetValue())
             drill_mm = float(self.drill.GetValue())
             spacing_mm = float(self.spacing.GetValue())
+            x_offset_mm = float(self.x_offset.GetValue())
+            y_offset_mm = float(self.y_offset.GetValue())
         except ValueError:
-            raise ValueError("Via diameter, drill and spacing must be numbers (mm).")
+            raise ValueError("Via diameter, drill and spacing and offsets must be numbers (mm).")
 
         # isfinite first: nan parses fine as a float and then compares False
         # against everything, so it would slip past both checks below and only
@@ -656,11 +909,16 @@ class ViaStitchingDialog(wx.Dialog):
             raise ValueError("Pick the net to stitch.")
 
         return {
+            "via_type": via_type,
+            "start_layer": start_layer,
+            "end_layer": end_layer,
             "via_dia_mm": via_dia_mm,
             "drill_mm": drill_mm,
             "spacing_mm": spacing_mm,
-            "net_name": net_name,
             "pattern": PATTERNS[self.pattern.GetSelection()],
+            "net_name": net_name,
+            "x_offset_mm": x_offset_mm,
+            "y_offset_mm": y_offset_mm,
             "avoid_other_zones": self.avoid_zones.GetValue(),
             "avoid_footprints": self.avoid_footprints.GetValue(),
         }
