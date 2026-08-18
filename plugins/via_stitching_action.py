@@ -14,6 +14,7 @@ import math
 import os
 import sys
 import traceback
+from collections import defaultdict
 
 import wx
 
@@ -45,22 +46,28 @@ DEFAULT_SPACING_MM = 2.0
 DEFAULT_NET = "GND"
 PATTERNS = ["Hexagonal", "Square", "Staggered"]
 DEFAULT_PATTERN = "Square"
-DEFAULT_AVOID_OTHER_ZONES = True
+# Off by default: a via through another net's zone is not a DRC error. KiCad pulls
+# the fill back around it on the refill this plugin already triggers. And on the
+# common 4-layer stackup an inner power plane covers most of the board, so on by
+# default would place no vias at all where it otherwise places a full grid.
+# Tracks are the opposite case, so that keepout is unconditional.
+DEFAULT_AVOID_OTHER_ZONES = False
 # Off by default: thermal-via arrays under a QFN/BGA ground pad are a common,
 # intentional use of via stitching, so this must not block them by default.
 DEFAULT_AVOID_FOOTPRINTS = False
 
 # Safety margins applied silently (the dialog has no clearance field, by design).
-# A via placed at least (via_radius + EDGE_EPS) inside the zone fill stays clear of
-# other-net copper, because KiCad already pulled the fill back by the board
-# clearance when filling. EDGE_EPS just absorbs polygon rounding.
+# The inset keeps a via at least (via_radius + EDGE_EPS) inside the fill on every
+# layer the net is poured on, where KiCad has already pulled the fill back by the
+# board clearance. It says nothing about layers the net is *not* poured on: a
+# through via's drill crosses those too, which is what the track and zone keepouts
+# below are for. EDGE_EPS just absorbs polygon rounding.
 EDGE_EPS_MM = 0.05
 # Hole-to-hole margin kept between a new via drill and existing via/pad drills.
 HOLE_MARGIN_MM = 0.25
-# Clearance kept between a new via's copper and existing tracks of other nets.
-# The IPC API has no call for the board's real clearance rules, so this is a
-# fixed stand-in the same way HOLE_MARGIN_MM is, rather than the true value.
-TRACK_MARGIN_MM = 0.2
+# Copper-to-copper clearance used when KiCad's netclass carries no value of its
+# own, which is what a netclass inheriting the board minimum reports over IPC.
+FALLBACK_CLEARANCE_MM = 0.2
 
 # Warn before placing more than this many vias (keeps KiCad responsive).
 VIA_COUNT_WARN = 5000
@@ -131,19 +138,63 @@ def _layer_region(zones, net_name):
     return {layer: unary_union(polys) for layer, polys in per_layer.items()}
 
 
-def _keepout_region(board, new_via_radius_nm):
-    """Union of drill keepouts around existing vias and through-hole pads.
+def _fallback_clearances():
+    """Clearance lookup that answers FALLBACK_CLEARANCE_MM for every net."""
+    return defaultdict(lambda: from_mm(FALLBACK_CLEARANCE_MM))
+
+
+def _net_clearances(board, nets, net_name):
+    """Clearance in nm to hold between a via on `net_name` and each other net.
+
+    KiCad resolves the clearance between two items to the larger of their two
+    netclass values, so that maximum is what gets pre-computed per net here. A
+    netclass that simply inherits the board minimum reports no value of its own
+    over IPC, and those fall back to FALLBACK_CLEARANCE_MM, as does every net if
+    KiCad refuses the call outright.
+    """
+    clearances = _fallback_clearances()
+    try:
+        classes = board.get_netclass_for_nets(nets)
+    except Exception:
+        return clearances
+
+    fallback = from_mm(FALLBACK_CLEARANCE_MM)
+    values = {name: (nc.clearance or fallback) for name, nc in classes.items()}
+    own = values.get(net_name, fallback)
+    clearances.update({name: max(own, value) for name, value in values.items()})
+    return clearances
+
+
+def _blocked_predicate(shapes):
+    """Build a `blocked(x, y)` test over `shapes`, through one spatial index.
+
+    Unioning the keepouts first is what made this slow. On a board with 8000
+    track segments, the unary_union of the buffered tracks alone cost about 6 s
+    of a 7.7 s total, against 0.6 s for the STRtree used here, for exactly the
+    same set of blocked candidates.
+    """
+    if not shapes:
+        return lambda x, y: False
+
+    from shapely import STRtree
+    from shapely.geometry import Point
+
+    tree = STRtree(shapes)
+    return lambda x, y: len(tree.query(Point(x, y), predicate="intersects")) > 0
+
+
+def _keepout_shapes(board, via_radius_nm):
+    """Drill keepouts around existing vias and through-hole pads.
 
     Prevents new stitching vias from violating hole-to-hole clearance.
     """
     from shapely.geometry import Point
-    from shapely.ops import unary_union
 
     margin = from_mm(HOLE_MARGIN_MM)
     circles = []
 
     for via in board.get_vias():
-        r = new_via_radius_nm + via.drill_diameter // 2 + margin
+        r = via_radius_nm + via.drill_diameter // 2 + margin
         circles.append(Point(via.position.x, via.position.y).buffer(r, quad_segs=8))
 
     for pad in board.get_pads():
@@ -155,14 +206,14 @@ def _keepout_region(board, new_via_radius_nm):
             hole_r = 0
         if hole_r <= 0:
             continue
-        r = new_via_radius_nm + hole_r + margin
+        r = via_radius_nm + hole_r + margin
         circles.append(Point(pad.position.x, pad.position.y).buffer(r, quad_segs=8))
 
-    return unary_union(circles) if circles else None
+    return circles
 
 
-def _track_keepout_region(board, via_radius_nm, net_name):
-    """Union of clearance areas around other-nets' tracks, on any copper layer.
+def _track_keepout_shapes(board, net_name, via_radius_nm, clearances):
+    """Clearance areas around other nets' tracks, on any copper layer.
 
     A through via's drill spans every copper layer of the board, not just the
     ones `net_name` happens to be poured on, so a track on a layer the pour
@@ -170,10 +221,8 @@ def _track_keepout_region(board, via_radius_nm, net_name):
     has to be avoided or the via drills straight through it.
     """
     from shapely.geometry import LineString
-    from shapely.ops import unary_union
 
-    margin = from_mm(TRACK_MARGIN_MM)
-    lines = []
+    shapes = []
     for track in board.get_tracks():
         if track.net.name == net_name:
             continue
@@ -185,66 +234,68 @@ def _track_keepout_region(board, via_radius_nm, net_name):
             ]
         else:
             coords = [(track.start.x, track.start.y), (track.end.x, track.end.y)]
-        r = via_radius_nm + track.width // 2 + margin
-        lines.append(LineString(coords).buffer(r, quad_segs=8))
+        r = via_radius_nm + track.width // 2 + clearances[track.net.name]
+        shapes.append(LineString(coords).buffer(r, quad_segs=8))
 
-    return unary_union(lines) if lines else None
+    return shapes
 
 
-def _zone_keepout_region(zones, net_name, via_radius_nm):
-    """Union of clearance areas around other-nets' filled zones, on any layer.
+def _zone_keepout_shapes(zones, net_name, via_radius_nm, clearances):
+    """Clearance areas around other nets' filled zones, on any layer.
 
     A through via's drill spans every copper layer, so a filled zone for a
     different net on a layer `net_name` never pours on (an inner power plane
-    under a GND-poured outer layer, say) still has to be avoided or the via
-    shorts into it.
+    under a GND-poured outer layer, say) can still be worth avoiding, even
+    though KiCad's refill would clear the fill back around the via by itself.
     """
-    from shapely.ops import unary_union
-
-    margin = from_mm(TRACK_MARGIN_MM)
-    polys = []
+    shapes = []
     for zone in zones:
         net = zone.net
         if net is not None and net.name == net_name:
             continue
-        for shapes in zone.filled_polygons.values():
-            for pwh in shapes:
+        margin = via_radius_nm + clearances[net.name if net is not None else ""]
+        for filled in zone.filled_polygons.values():
+            for pwh in filled:
                 poly = _polygon_with_holes_to_shapely(pwh)
                 if poly is not None:
-                    polys.append(poly.buffer(via_radius_nm + margin, quad_segs=8))
+                    shapes.append(poly.buffer(margin, quad_segs=8))
 
-    return unary_union(polys) if polys else None
+    return shapes
 
 
-def _footprint_keepout_region(board, via_radius_nm):
-    """Union of clearance areas around every footprint's bounding box.
+def _footprint_keepout_shapes(board, net_name, via_radius_nm, clearances):
+    """Clearance areas around every footprint's bounding box.
 
     Keeps vias out from under component bodies (BGAs, connectors, anything
     with fine-pitch leads underneath). This is a mechanical fit concern, not
     a copper one, so it applies regardless of the footprint's net.
     """
     from shapely.geometry import box as shapely_box
-    from shapely.ops import unary_union
 
     footprints = board.get_footprints()
     if not footprints:
-        return None
+        return []
 
-    margin = via_radius_nm + from_mm(TRACK_MARGIN_MM)
-    polys = []
-    for bbox in board.get_item_bounding_box(footprints):
-        if bbox is None:
-            continue
-        polys.append(
-            shapely_box(
-                bbox.pos.x - margin,
-                bbox.pos.y - margin,
-                bbox.pos.x + bbox.size.x + margin,
-                bbox.pos.y + bbox.size.y + margin,
-            )
+    # KiCad drops any item it has no box for, so this list can come back short.
+    # Silently not avoiding those is the one outcome worth saying out loud.
+    boxes = board.get_item_bounding_box(footprints)
+    if len(boxes) < len(footprints):
+        _to_stderr(
+            f"Via Stitching: KiCad returned no bounding box for "
+            f"{len(footprints) - len(boxes)} of {len(footprints)} footprints. "
+            "Those are not being avoided."
         )
 
-    return unary_union(polys) if polys else None
+    margin = via_radius_nm + clearances[net_name]
+    return [
+        shapely_box(
+            bbox.pos.x - margin,
+            bbox.pos.y - margin,
+            bbox.pos.x + bbox.size.x + margin,
+            bbox.pos.y + bbox.size.y + margin,
+        )
+        for bbox in boxes
+    ]
 
 
 def _grid_points(bounds, spacing_nm, pattern):
@@ -329,7 +380,8 @@ def stitch(
     via_radius_nm = diameter_nm // 2
 
     # Resolve the real Net object (carries the proper proto for assignment).
-    net = next((n for n in board.get_nets() if n.name == net_name), None)
+    nets = board.get_nets()
+    net = next((n for n in nets if n.name == net_name), None)
     if net is None:
         raise RuntimeError(f"Net '{net_name}' not found on the board.")
 
@@ -377,33 +429,40 @@ def stitch(
             "Try a smaller spacing or via diameter."
         )
 
-    # Avoid existing via/pad drill holes and other-net tracks on any layer.
-    keepout = _keepout_region(board, via_radius_nm)
-    track_keepout = _track_keepout_region(board, via_radius_nm, net_name)
-    if track_keepout is not None:
-        keepout = track_keepout if keepout is None else keepout.union(track_keepout)
+    # Every keepout as one flat list of shapes, tested through a single spatial
+    # index. Avoid existing via/pad drill holes and other nets' tracks on any
+    # layer, plus whatever else the dialog asked for.
+    clearances = _net_clearances(board, nets, net_name)
+    keepout = _keepout_shapes(board, via_radius_nm)
+    keepout += _track_keepout_shapes(board, net_name, via_radius_nm, clearances)
     if avoid_other_zones:
-        zone_keepout = _zone_keepout_region(zones, net_name, via_radius_nm)
-        if zone_keepout is not None:
-            keepout = zone_keepout if keepout is None else keepout.union(zone_keepout)
+        keepout += _zone_keepout_shapes(zones, net_name, via_radius_nm, clearances)
     if avoid_footprints:
-        footprint_keepout = _footprint_keepout_region(board, via_radius_nm)
-        if footprint_keepout is not None:
-            keepout = (
-                footprint_keepout if keepout is None else keepout.union(footprint_keepout)
-            )
-    if keepout is None:
-        points = candidates
-    else:
-        blocked = prep(keepout)
-        points = [(x, y) for (x, y) in candidates if not blocked.intersects(Point(x, y))]
+        keepout += _footprint_keepout_shapes(board, net_name, via_radius_nm, clearances)
+
+    blocked = _blocked_predicate(keepout)
+    points = [(x, y) for (x, y) in candidates if not blocked(x, y)]
     if not points:
+        # Only name the optional keepouts that are actually switched on, so this
+        # never sends someone off to untick a box that is already off.
+        optional = [
+            name
+            for name, on in (
+                ("other nets' zones", avoid_other_zones),
+                ("footprints", avoid_footprints),
+            )
+            if on
+        ]
+        blockers = " or ".join(["existing vias, pads or tracks"] + optional)
+        untick = (
+            " Or untick " + " or ".join(f"'Avoid {n}'" for n in optional) + "."
+            if optional
+            else ""
+        )
         raise RuntimeError(
-            f"All {len(candidates)} candidate positions are blocked by existing "
-            "vias, pads, tracks, zones of other nets, or footprints.\n"
-            "If these zones are already stitched, delete the previous vias first. "
-            "Otherwise try a smaller spacing, or untick 'Avoid other nets' zones' "
-            "or 'Avoid footprints' if one of those is what's blocking them."
+            f"All {len(candidates)} candidate positions are blocked by {blockers}.\n"
+            "If these zones are already stitched, delete the previous vias first, "
+            "or try a smaller spacing." + untick
         )
 
     if len(points) > VIA_COUNT_WARN:
@@ -496,9 +555,24 @@ class ViaStitchingDialog(wx.Dialog):
 
         self.avoid_zones = wx.CheckBox(self, label="Avoid other nets' zones")
         self.avoid_zones.SetValue(DEFAULT_AVOID_OTHER_ZONES)
+        self.avoid_zones.SetToolTip(
+            "Keep vias out of other nets' filled copper on every layer.\n\n"
+            "Off by default: a via through another net's pour is not a DRC "
+            "error, because KiCad clears the fill back around it when the "
+            "zones are refilled.\n\n"
+            "Tick this to leave an inner power plane unperforated. Expect far "
+            "fewer vias, since such a plane often covers most of the board."
+        )
 
         self.avoid_footprints = wx.CheckBox(self, label="Avoid footprints")
         self.avoid_footprints.SetValue(DEFAULT_AVOID_FOOTPRINTS)
+        self.avoid_footprints.SetToolTip(
+            "Keep vias out from under every component's bounding box.\n\n"
+            "This is about mechanical fit, not clearance, so it applies "
+            "whatever net the footprint is on.\n\n"
+            "Off by default: a thermal via array under a QFN or BGA ground pad "
+            "is a normal use of via stitching, and this would block it."
+        )
 
         buttons = self.CreateButtonSizer(wx.OK | wx.CANCEL)
 

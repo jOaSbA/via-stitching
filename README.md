@@ -41,6 +41,11 @@ and restart the PCB editor.
    - Spacing (mm) for the centre-to-centre grid pitch.
    - Net Name, the net to stitch (defaults to `GND`).
    - Pattern: Hexagonal (densest), Square, or Staggered.
+   - Avoid other nets' zones, off by default. See below.
+   - Avoid footprints, off by default. Keeps vias out from under component
+     bodies, for mechanical fit rather than clearance. Leave it off if you want
+     thermal-via arrays under a QFN or BGA ground pad, which is a normal use of
+     via stitching.
 3. Click OK. Vias go only where the net is poured on every layer it occupies,
    inset far enough to stay DRC-clean, and the zones are refilled for you.
 
@@ -54,11 +59,28 @@ All placed vias go into one group named `ViaStitching <net>`:
 
 ## How clearance is handled
 
-There's no clearance field, on purpose. A via is placed only where it sits at
-least its own radius (plus a small epsilon) inside the fill on every layer. KiCad
-has already pulled the zone fill back by the board clearance, so that inset keeps
-the via off other-net copper. Existing via and pad drill holes are avoided with a
-0.25 mm hole-to-hole margin.
+There's no clearance field, on purpose. Four things keep the vias legal:
+
+- **The fill inset.** A via is placed only where it sits at least its own radius
+  (plus a small epsilon) inside the fill on every layer the net is poured on.
+  KiCad has already pulled those fills back by the board clearance, so the inset
+  keeps the via off other-net copper *on those layers*.
+- **Other nets' tracks.** The inset says nothing about layers the net isn't
+  poured on, and a through via's drill crosses those too, so tracks of other nets
+  are avoided on every copper layer. This is unconditional: a via sitting on
+  another net's track is a real DRC violation.
+- **Existing holes.** Via and pad drills are avoided with a 0.25 mm
+  hole-to-hole margin.
+- **Clearance values** come from the board's netclasses, taking the larger of the
+  two nets involved the way KiCad's own rules do. A netclass that just inherits
+  the board minimum reports no value over the IPC API, and those fall back to
+  0.2 mm.
+
+The **Avoid other nets' zones** checkbox is off by default, because a via through
+another net's zone is not a DRC error: KiCad pulls the fill back around it during
+the refill this plugin already triggers. Tick it if you'd rather not perforate an
+inner power plane at all. Expect far fewer vias, since on a typical 4-layer board
+that plane covers most of the board.
 
 If you see "No filled copper for net ...", fill the zones (`B`) and run again.
 
