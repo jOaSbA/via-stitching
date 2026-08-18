@@ -273,6 +273,35 @@ def _zone_keepout_shapes(zones, net_name, via_radius_nm, clearances):
     return shapes
 
 
+def _rule_area_keepout_shapes(zones, via_radius_nm):
+    """Outlines of rule areas that forbid vias.
+
+    A rule area is an explicit "keep out" from whoever laid the board out, so
+    this is unconditional and takes no clearance on top: the rule is that the
+    via simply is not inside the area.
+
+    Layers are ignored on purpose. A through via crosses every copper layer, so
+    a via keepout on any single layer still catches it.
+
+    kipy 0.7.1 wraps a zone's copper settings but not its RuleAreaSettings, so
+    the restriction flags are read off the proto.
+    """
+    shapes = []
+    for zone in zones:
+        if not zone.is_rule_area():
+            continue
+        if not zone.proto.rule_area_settings.keepout_vias:
+            continue
+        # Zone.outline indexes polygons[0], which an empty PolySet would not have.
+        if not zone.proto.outline.polygons:
+            continue
+        poly = _polygon_with_holes_to_shapely(zone.outline)
+        if poly is not None:
+            shapes.append(poly.buffer(via_radius_nm, quad_segs=8))
+
+    return shapes
+
+
 def _footprint_keepout_shapes(board, net_name, via_radius_nm, clearances):
     """Clearance areas around every footprint's bounding box.
 
@@ -444,6 +473,7 @@ def stitch(
     # layer, plus whatever else the dialog asked for.
     clearances = _net_clearances(board, nets, net_name)
     keepout = _keepout_shapes(board, via_radius_nm)
+    keepout += _rule_area_keepout_shapes(zones, via_radius_nm)
     keepout += _track_keepout_shapes(board, net_name, via_radius_nm, clearances)
     if avoid_other_zones:
         keepout += _zone_keepout_shapes(zones, net_name, via_radius_nm, clearances)
@@ -463,7 +493,9 @@ def stitch(
             )
             if on
         ]
-        blockers = " or ".join(["existing vias, pads or tracks"] + optional)
+        blockers = " or ".join(
+            ["existing vias, pads, tracks or rule areas"] + optional
+        )
         untick = (
             " Or untick " + " or ".join(f"'Avoid {n}'" for n in optional) + "."
             if optional

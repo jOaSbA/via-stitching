@@ -59,7 +59,7 @@ All placed vias go into one group named `ViaStitching <net>`:
 
 ## How clearance is handled
 
-There's no clearance field, on purpose. Four things keep the vias legal:
+There's no clearance field, on purpose. Five things keep the vias legal:
 
 - **The fill inset.** A via is placed only where it sits at least its own radius
   (plus a small epsilon) inside the fill on every layer the net is poured on.
@@ -69,8 +69,11 @@ There's no clearance field, on purpose. Four things keep the vias legal:
   poured on, and a through via's drill crosses those too, so tracks of other nets
   are avoided on every copper layer. This is unconditional: a via sitting on
   another net's track is a real DRC violation.
+- **Rule areas.** A rule area that forbids vias is respected on every copper
+  layer, whichever layers it was drawn on, since a through via crosses all of
+  them.
 - **Existing holes.** Via and pad drills are avoided with a 0.25 mm
-  hole-to-hole margin.
+  hole-to-hole margin. A milled slot is measured across its long axis.
 - **Clearance values** come from the board's netclasses, taking the larger of the
   two nets involved the way KiCad's own rules do. A netclass that just inherits
   the board minimum reports no value over the IPC API, and those fall back to

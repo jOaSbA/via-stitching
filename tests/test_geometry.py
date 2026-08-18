@@ -24,6 +24,7 @@ from via_stitching_action import (  # noqa: E402
     _keepout_shapes,
     _make_via,
     _net_clearances,
+    _rule_area_keepout_shapes,
     _track_keepout_shapes,
     _zone_keepout_shapes,
 )
@@ -239,6 +240,63 @@ def test_zone_keepout_skips_same_net_blocks_others():
     # through via drills through it regardless of layer.
     assert blocked(from_mm(12.5), from_mm(2.5))
     assert not blocked(from_mm(30.0), from_mm(2.5))
+
+
+def test_rule_area_keepout_blocks_via_keepouts_only():
+    # Regression: a "no vias" rule area is an explicit instruction from whoever
+    # laid the board out, and nothing used to consult it at all.
+    from types import SimpleNamespace
+
+    # Pin the proto field this reads through: kipy 0.7.1 wraps a zone's copper
+    # settings but not its RuleAreaSettings, so a rename there would silently
+    # switch the whole keepout off.
+    from kipy.proto.board.board_types_pb2 import RuleAreaSettings
+
+    assert "keepout_vias" in RuleAreaSettings.DESCRIPTOR.fields_by_name
+
+    def node(x, y):
+        return SimpleNamespace(has_point=True, has_arc=False, point=SimpleNamespace(x=x, y=y))
+
+    def rule_area(x0, y0, x1, y1, keepout_vias):
+        outline = SimpleNamespace(
+            nodes=[node(x0, y0), node(x1, y0), node(x1, y1), node(x0, y1)]
+        )
+        pwh = SimpleNamespace(outline=outline, holes=[])
+        return SimpleNamespace(
+            is_rule_area=lambda: True,
+            outline=pwh,
+            proto=SimpleNamespace(
+                rule_area_settings=SimpleNamespace(keepout_vias=keepout_vias),
+                outline=SimpleNamespace(polygons=[pwh]),
+            ),
+        )
+
+    no_vias = rule_area(0, 0, from_mm(5.0), from_mm(5.0), True)
+    other_restriction = rule_area(
+        from_mm(10.0), 0, from_mm(15.0), from_mm(5.0), False
+    )
+    copper_zone = SimpleNamespace(is_rule_area=lambda: False)
+
+    blocked = _blocked_predicate(
+        _rule_area_keepout_shapes(
+            [no_vias, other_restriction, copper_zone], from_mm(0.3)
+        )
+    )
+
+    assert blocked(from_mm(2.5), from_mm(2.5))
+    # A rule area that restricts something else (tracks, footprints) must not
+    # stop vias going in.
+    assert not blocked(from_mm(12.5), from_mm(2.5))
+    assert not blocked(from_mm(30.0), from_mm(2.5))
+
+    # The via's copper, not just its centre, has to clear the boundary.
+    assert blocked(from_mm(5.0) + from_mm(0.2), from_mm(2.5))
+    assert not blocked(from_mm(5.0) + from_mm(0.4), from_mm(2.5))
+
+    # A rule area KiCad handed over without an outline must not raise.
+    empty = rule_area(0, 0, from_mm(1.0), from_mm(1.0), True)
+    empty.proto.outline.polygons = []
+    assert _rule_area_keepout_shapes([empty], from_mm(0.3)) == []
 
 
 def test_footprint_keepout_covers_bounding_box():
