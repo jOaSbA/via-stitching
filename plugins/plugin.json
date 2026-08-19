@@ -10,7 +10,7 @@
     "actions": [
         {
             "identifier": "via-stitch",
-            "name": "Via Stitching",
+            "name": "Via Stitching 1.1.0\n\nSelect an existing via to clone its properties.",
             "description": "Stitch ground planes together with a grid of vias",
             "show-button": true,
             "scopes": [

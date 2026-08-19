@@ -12,18 +12,24 @@
 import json
 import math
 import os
+import re
 import sys
 import traceback
 from collections import defaultdict
+from pathlib import Path
 
 import wx
+import wx.adv
 
 from kipy import KiCad
 from kipy.errors import ApiError, ConnectionError as KiCadConnectionError
 from kipy.proto.common import ApiStatusCode
-from kipy.board_types import Group, Via, ArcTrack, BoardLayer, PadType, PSS_CIRCLE
+from kipy.proto.common.types import KiCadObjectType
+from kipy.proto.board.board_types_pb2 import BoardLayer as BL, ViaType
+from kipy.board_types import Group, Via, ArcTrack, PadType, PSS_CIRCLE
 from kipy.geometry import Vector2
-from kipy.util import from_mm
+from kipy.util.units import from_mm, to_mm
+from kipy.util.board_layer import iter_copper_layers
 
 # Make the sibling helper modules importable regardless of how KiCad launches us.
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -58,6 +64,7 @@ DEFAULT_AVOID_OTHER_ZONES = False
 # intentional use of via stitching, so this must not block them by default.
 DEFAULT_AVOID_FOOTPRINTS = False
 
+
 # Safety margins applied silently (the dialog has no clearance field, by design).
 # The inset keeps a via at least (via_radius + EDGE_EPS) inside the fill on every
 # layer the net is poured on, where KiCad has already pulled the fill back by the
@@ -77,7 +84,6 @@ VIA_COUNT_WARN = 5000
 # Environment lines for error reports. Filled in once we know the KiCad version.
 _ENV = []
 
-
 def _kipy_version():
     try:
         from importlib.metadata import version
@@ -86,6 +92,88 @@ def _kipy_version():
     except Exception:
         return "unknown"
 
+
+def _kicad_config_dirs():
+    """KiCad's per-version config directories, newest version first.
+
+    KiCad keeps per-version settings (kicad_common.json, pcbnew.json,
+    colors/) under one directory per platform. Shared by
+    _api_enabled_in_config and _layer_colors so there's exactly one place
+    that knows where KiCad's config lives on each OS, instead of each caller
+    hardcoding its own (previously Linux-only) guess.
+    """
+    root = os.environ.get("KICAD_CONFIG_HOME")
+    if not root:
+        if sys.platform == "win32":
+            root = os.path.join(os.environ.get("APPDATA", ""), "kicad")
+        elif sys.platform == "darwin":
+            root = os.path.expanduser("~/Library/Preferences/kicad")
+        else:
+            root = os.path.join(
+                os.environ.get("XDG_CONFIG_HOME") or os.path.expanduser("~/.config"),
+                "kicad",
+            )
+    try:
+        # Version subdirectories, newest first, so KiCad 11 wins over 10.
+        versions = sorted(
+            (d for d in os.listdir(root) if os.path.isdir(os.path.join(root, d))),
+            key=lambda d: [int(p) for p in d.split(".") if p.isdigit()] or [0],
+            reverse=True,
+        )
+    except Exception:
+        return []
+    return [os.path.join(root, name) for name in versions]
+
+
+# KiCad default theme copper colors (fallback)
+_DEFAULT_COPPER = {
+    "f": (200, 52, 52), "in1": (127, 200, 127), "in2": (206, 125, 66),
+    "in3": (79, 203, 203), "in4": (219, 98, 139), "in5": (167, 165, 198),
+    "in6": (40, 204, 217), "b": (77, 127, 196),
+}
+
+def _copper_key_to_layer(key):
+    if key == "f":
+        return BL.BL_F_Cu
+    if key == "b":
+        return BL.BL_B_Cu
+    m = re.match(r"in(\d+)$", key)
+    return getattr(BL, f"BL_In{m.group(1)}_Cu", None) if m else None
+
+def _layer_colors():
+    """{BoardLayer: (r, g, b)} from the active KiCad color theme, with fallbacks."""
+    copper = dict(_DEFAULT_COPPER)
+    try:
+        for config_dir in _kicad_config_dirs():
+            pcbnew_json = Path(config_dir) / "pcbnew.json"
+            if not pcbnew_json.exists():
+                continue
+            theme = json.loads(pcbnew_json.read_text())["appearance"]["color_theme"]
+            data = json.loads((Path(config_dir) / "colors" / f"{theme}.json").read_text())
+            for key, val in data.get("board", {}).get("copper", {}).items():
+                m = re.match(r"rgba?\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)", val)
+                if m:
+                    copper[key.lower()] = tuple(map(int, m.groups()))
+            break  # newest version dir with a pcbnew.json wins
+    except Exception:
+        pass  # built-in theme or unreadable config: defaults stand
+    out = {}
+    for key, rgb in copper.items():
+        layer = _copper_key_to_layer(key)
+        if layer is not None:
+            out[layer] = rgb
+    return out
+
+def _color_swatch(rgb, size=14):
+    bmp = wx.Bitmap(size, size)
+    dc = wx.MemoryDC(bmp)
+    dc.SetBackground(wx.Brush(wx.Colour(*rgb)))
+    dc.Clear()
+    dc.SetPen(wx.Pen(wx.Colour(90, 90, 90)))
+    dc.SetBrush(wx.TRANSPARENT_BRUSH)
+    dc.DrawRectangle(0, 0, size, size)
+    dc.SelectObject(wx.NullBitmap)
+    return bmp
 
 def _polyline_coords(polyline):
     """Convert a kipy PolyLine into a list of (x, y) nm tuples for shapely.
@@ -123,19 +211,33 @@ def _polygon_with_holes_to_shapely(pwh):
     return poly if (not poly.is_empty) else None
 
 
+def _span_layers(board, start_layer, end_layer):
+    """All enabled copper layers between start and end, inclusive, in stackup order."""
+    enabled = set(board.get_enabled_layers())
+    order = [l for l in iter_copper_layers() if l in enabled]
+    i, j = order.index(start_layer), order.index(end_layer)
+    if i > j:
+        i, j = j, i          # user may have picked them "upside down"
+    return order[i:j + 1]
+
+
 def _layer_region(zones, net_name):
     """Return {layer: shapely geometry} of the filled copper of `net_name`."""
     from shapely.ops import unary_union
 
     per_layer = {}
     for zone in zones:
+        if zone.is_rule_area():
+            continue
         net = zone.net
         if net is None or net.name != net_name:
             continue
         for layer, shapes in zone.filled_polygons.items():
             for pwh in shapes:
                 poly = _polygon_with_holes_to_shapely(pwh)
-                if poly is not None:
+                if poly is not None and not poly.is_empty:
+                    if not poly.is_valid:
+                        poly = poly.buffer(0)   # repair rare self-intersections
                     per_layer.setdefault(layer, []).append(poly)
     return {layer: unary_union(polys) for layer, polys in per_layer.items()}
 
@@ -190,17 +292,25 @@ def _blocked_predicate(shapes):
     return lambda x, y: len(tree.query(Point(x, y), predicate="intersects")) > 0
 
 
-def _keepout_shapes(board, via_radius_nm):
+def _keepout_shapes(board, via_radius_nm, span):
     """Drill keepouts around existing vias and through-hole pads.
-
     Prevents new stitching vias from violating hole-to-hole clearance.
     """
     from shapely.geometry import Point
 
     margin = from_mm(HOLE_MARGIN_MM)
+    span_set = set(span)
     circles = []
 
     for via in board.get_vias():
+
+        try:
+            via_span = set(_span_layers(board, via.padstack.drill.start_layer, via.padstack.drill.end_layer))
+        except ValueError:
+            via_span = span_set  # unknown span: be conservative, treat as blocking
+        if not (via_span & span_set):
+            continue
+
         r = via_radius_nm + via.drill_diameter // 2 + margin
         circles.append(Point(via.position.x, via.position.y).buffer(r, quad_segs=8))
 
@@ -336,20 +446,22 @@ def _footprint_keepout_shapes(board, net_name, via_radius_nm, clearances):
         for bbox in boxes
     ]
 
-
 def _grid_points(bounds, spacing_nm, pattern):
-    """Yield candidate (x, y) nm points across `bounds` for the given pattern."""
+    """Yield candidate (x, y) nm points across `bounds` for the given pattern.
+
+    The grid is anchored to `bounds`, so the user controls placement via the
+    region itself (and the X/Y offset parameters). Positions are therefore
+    not reproducible across runs if the region's bounding box changes.
+    """
     minx, miny, maxx, maxy = bounds
     minx, miny = int(math.floor(minx)), int(math.floor(miny))
     maxx, maxy = int(math.ceil(maxx)), int(math.ceil(maxy))
-
     if pattern == "Hexagonal":
-        row_pitch = int(spacing_nm * math.sqrt(3) / 2)
+        row_pitch = round(spacing_nm * math.sqrt(3) / 2)
     else:
         row_pitch = spacing_nm
-    if row_pitch <= 0:
+    if row_pitch <= 0 or spacing_nm <= 0:
         return
-
     row = 0
     y = miny
     while y <= maxy:
@@ -364,9 +476,12 @@ def _grid_points(bounds, spacing_nm, pattern):
         row += 1
 
 
-def _make_via(x, y, diameter_nm, drill_nm, net):
+def _make_via(x, y, via_type, start_layer, end_layer, diameter_nm, drill_nm, net):
     """Create a through Via with a valid single-layer PST_NORMAL padstack."""
     via = Via()  # defaults to VT_THROUGH with a PST_NORMAL, F_Cu-only padstack
+    via.type = via_type
+    via.padstack.drill.start_layer = start_layer
+    via.padstack.drill.end_layer = end_layer
     via.diameter = diameter_nm
     via.drill_diameter = drill_nm
     via.padstack.copper_layers[0].shape = PSS_CIRCLE
@@ -375,7 +490,7 @@ def _make_via(x, y, diameter_nm, drill_nm, net):
     return via
 
 
-def _group_vias(board, vias, net_name):
+def _group_vias(board, vias, net_name, start_layer, end_layer):
     """Bundle the vias into one named group. Best effort, never raises.
 
     Built on create_items, not the editor's Group Items action. Driving that action
@@ -386,12 +501,13 @@ def _group_vias(board, vias, net_name):
     get_groups(), which raises ApiError if any unrelated group on the board has a
     dangling member. create_items needs no selection and returns what it made.
     """
+
     if not vias:
         return False
     try:
         group = Group()
         # Group.name is read-only in kicad-python 0.7.x, the inherited proto is not.
-        group.proto.name = f"ViaStitching {net_name}"
+        group.proto.name = f"ViaStitching {net_name} {start_layer}:{end_layer}"
         group.items = vias  # stores the member KIIDs, so the vias must exist already
         return bool(board.create_items(group))
     except Exception:
@@ -399,16 +515,10 @@ def _group_vias(board, vias, net_name):
 
 
 def stitch(
-    board,
-    net_name,
-    via_dia_mm,
-    drill_mm,
-    spacing_mm,
-    pattern,
-    avoid_other_zones=DEFAULT_AVOID_OTHER_ZONES,
-    avoid_footprints=DEFAULT_AVOID_FOOTPRINTS,
-    parent=None,
-):
+    board, via_type, start_layer, end_layer, net_name, via_dia_mm, drill_mm, spacing_mm, pattern, 
+    x_offset_mm, y_offset_mm, 
+    avoid_other_zones=DEFAULT_AVOID_OTHER_ZONES, avoid_footprints=DEFAULT_AVOID_FOOTPRINTS, parent=None):
+
     """Run the stitching. Returns (vias placed, whether they were grouped)."""
     from shapely.geometry import Point
     from shapely.prepared import prep
@@ -417,6 +527,9 @@ def stitch(
     drill_nm = from_mm(drill_mm)
     spacing_nm = from_mm(spacing_mm)
     via_radius_nm = diameter_nm // 2
+
+    x_offset_nm = from_mm(x_offset_mm)
+    y_offset_nm = from_mm(y_offset_mm)
 
     # Resolve the real Net object (carries the proper proto for assignment).
     nets = board.get_nets()
@@ -431,19 +544,34 @@ def stitch(
             f"No filled copper found for net '{net_name}'.\n"
             "Fill the zones first (press B in the PCB editor), then run again."
         )
-    if len(regions) < 2:
-        only = BoardLayer.Name(next(iter(regions)))
+
+    span = _span_layers(board, start_layer, end_layer)
+
+    # The via must land on the net's copper on the two layers it connects.
+    missing = [l for l in (start_layer, end_layer) if l not in regions]
+    if missing:
+        names = ", ".join(board.get_layer_name(l) for l in missing)
         raise RuntimeError(
-            f"Net '{net_name}' only has filled copper on one layer ({only}).\n"
-            "Via stitching needs the net poured on at least two layers."
+            f"Net '{net_name}' has no filled copper on: {names}.\n"
+            "Pick start/end layers where the net is poured, or fill the zones "
+            "first (press B in the PCB editor)."
         )
 
-    # Region where a through via lands on copper on every layer the net is poured.
-    region = None
-    for geom in regions.values():
-        region = geom if region is None else region.intersection(geom)
-    if region is None or region.is_empty:
-        raise RuntimeError("The selected net's planes do not overlap anywhere.")
+    region = regions[start_layer].intersection(regions[end_layer])
+
+    # Intermediate layers inside the span: where this net is poured there too,
+    # keep the via on that copper (the barrel connects those layers as well).
+    # Layers in the span where the net is NOT poured are left to DRC: the barrel
+    # passing through another net's copper there is not checked here.
+    for layer in span:
+        if layer in regions and layer not in (start_layer, end_layer):
+            region = region.intersection(regions[layer])
+
+    if region.is_empty:
+        raise RuntimeError(
+            "The selected net's planes do not overlap anywhere on the "
+            "selected layer span."
+        )
 
     # Inset so the via body + clearance ring stay inside the fill on all layers.
     inset = via_radius_nm + from_mm(EDGE_EPS_MM)
@@ -472,7 +600,7 @@ def stitch(
     # index. Avoid existing via/pad drill holes and other nets' tracks on any
     # layer, plus whatever else the dialog asked for.
     clearances = _net_clearances(board, nets, net_name)
-    keepout = _keepout_shapes(board, via_radius_nm)
+    keepout = _keepout_shapes(board, via_radius_nm, span)
     keepout += _rule_area_keepout_shapes(zones, via_radius_nm)
     keepout += _track_keepout_shapes(board, net_name, via_radius_nm, clearances)
     if avoid_other_zones:
@@ -481,7 +609,12 @@ def stitch(
         keepout += _footprint_keepout_shapes(board, net_name, via_radius_nm, clearances)
 
     blocked = _blocked_predicate(keepout)
-    points = [(x, y) for (x, y) in candidates if not blocked(x, y)]
+    points = [
+        (ox, oy)
+        for (ox, oy) in ((x + x_offset_nm, y + y_offset_nm) for (x, y) in candidates)
+        if prepared.contains(Point(ox, oy)) and not blocked(ox, oy)
+    ]
+
     if not points:
         # Only name the optional keepouts that are actually switched on, so this
         # never sends someone off to untick a box that is already off.
@@ -516,7 +649,7 @@ def stitch(
         if wx.MessageBox(msg, "Many vias", style, parent) != wx.YES:
             return 0, False
 
-    vias = [_make_via(x, y, diameter_nm, drill_nm, net) for (x, y) in points]
+    vias = [_make_via(x, y, via_type, start_layer, end_layer, diameter_nm, drill_nm, net) for (x, y) in points]
 
     # No explicit commit: one create_items call is already one undo step, and an
     # open commit can be seized or rolled back by anything else touching the editor.
@@ -535,7 +668,7 @@ def stitch(
             "board. Nothing was rolled back, so check the board before saving."
         )
 
-    grouped = _group_vias(board, created, net_name)
+    grouped = _group_vias(board, created, net_name, start_layer, end_layer)
 
     # Refilling is safe: vias placed this way survive a manual B and an API refill.
     # block=False because kipy's blocking poll loop never increments its counter, so
@@ -551,7 +684,7 @@ def stitch(
 class ViaStitchingDialog(wx.Dialog):
     """The 'Via Stitching Parameters' input dialog."""
 
-    def __init__(self, parent, net_names):
+    def __init__(self, parent, net_names, board):
         super().__init__(
             parent,
             title="Via Stitching Parameters",
@@ -564,38 +697,122 @@ class ViaStitchingDialog(wx.Dialog):
         if os.path.exists(icon_path):
             self.SetIcon(wx.Icon(icon_path, wx.BITMAP_TYPE_PNG))
 
-        grid = wx.FlexGridSizer(5, 2, 8, 10)
-        grid.AddGrowableCol(1, 1)
+        # Default tooltip auto-pop is ~5s, too short for the multi-paragraph
+        # tooltips below. This is a process-global wx setting, so one call here
+        # covers every tooltip in the dialog. Windows' native tooltip control
+        # takes this as a signed 16-bit delay (TTM_SETDELAYTIME): anything at
+        # or above 32768 wraps around and comes back *shorter* than the
+        # default, which is why 60000 didn't actually help. 32000 is the
+        # longest value that doesn't wrap.
+        wx.ToolTip.SetAutoPop(32000)
+
+        enabled = set(board.get_enabled_layers())
+        copper_layer_ids = [l for l in iter_copper_layers() if l in enabled]
+        self.layer_map   = {board.get_layer_name(l): l for l in copper_layer_ids}
+        self.layer_names = {v: k for k, v in self.layer_map.items()}
+        copper_layer_names = list(self.layer_map.keys())
+        self._all_layer_names = copper_layer_names  # physical order, front to back
+        self._layer_colors = _layer_colors()
+        layer_colors = self._layer_colors
+
+        self.VIA_TYPE_CHOICES = {
+            "Through":      ViaType.VT_THROUGH,
+            "Micro":        ViaType.VT_MICRO,
+            "Blind/Buried": ViaType.VT_BLIND_BURIED,
+            "Blind":        ViaType.VT_BLIND,
+            "Buried":       ViaType.VT_BURIED,
+        }
+
+        self.VIA_TYPE_NAMES = {v: k for k, v in self.VIA_TYPE_CHOICES.items()}   # int -> name
+
+        selected_vias = board.get_selection(KiCadObjectType.KOT_PCB_VIA)
+        sample_via = None
+        if selected_vias:
+            sample_via = selected_vias[0]
+            sample_via_start_layer = sample_via.padstack.drill.start_layer
+            sample_via_end_layer = sample_via.padstack.drill.end_layer
+            sample_via_net_name = sample_via.net.name
+
+        grid = wx.FlexGridSizer(cols=2, vgap=5, hgap=5)
+        grid.AddGrowableCol(1)
 
         def add_row(label, ctrl):
-            grid.Add(
-                wx.StaticText(self, label=label),
-                0,
-                wx.ALIGN_CENTER_VERTICAL,
-            )
+            grid.Add(wx.StaticText(self, label=label), 0, wx.ALIGN_CENTER_VERTICAL)
             grid.Add(ctrl, 1, wx.EXPAND)
 
-        self.via_dia = wx.TextCtrl(self, value=str(DEFAULT_VIA_DIAMETER_MM))
-        self.drill = wx.TextCtrl(self, value=str(DEFAULT_DRILL_MM))
-        self.spacing = wx.TextCtrl(self, value=str(DEFAULT_SPACING_MM))
+        via_types = list(self.VIA_TYPE_CHOICES.keys())
+        self.via_type = wx.Choice(self, choices=via_types)
+        if sample_via:
+            self.via_type.SetStringSelection(self.VIA_TYPE_NAMES.get(sample_via.type))
+        else:
+            self.via_type.SetSelection(0)
+        self.via_type.Bind(wx.EVT_CHOICE, lambda evt: self._refresh_layer_controls())
 
-        names = list(net_names)
-        self.net = wx.ComboBox(self, choices=names, style=wx.CB_DROPDOWN)
-        if DEFAULT_NET in names:
-            self.net.SetValue(DEFAULT_NET)
-        elif names:
-            self.net.SetSelection(0)
+        def _layer_combo():
+            combo = wx.adv.BitmapComboBox(self, style=wx.CB_READONLY)
+            for name in copper_layer_names:
+                rgb = layer_colors.get(self.layer_map[name], (128, 128, 128))
+                combo.Append(name, _color_swatch(rgb))
+            return combo
+
+        self.start_layer = _layer_combo()
+        if sample_via:
+            self.start_layer.SetStringSelection(self.layer_names[sample_via_start_layer])
+        else:
+            self.start_layer.SetSelection(0)
+        self.end_layer = _layer_combo()
+        if sample_via:
+            self.end_layer.SetStringSelection(self.layer_names[sample_via_end_layer])
+        else:
+            self.end_layer.SetSelection(len(copper_layer_names) - 1)
+        # Micro's end layer is derived from which outer layer the start is, so
+        # changing the start has to re-derive it.
+        self.start_layer.Bind(wx.EVT_COMBOBOX, lambda evt: self._refresh_layer_controls())
+
+        if sample_via:
+            via_dia_mm_str = str(to_mm(sample_via.diameter))
+            viar_drill_mm_str = str(to_mm(sample_via.drill_diameter))
+            spacing_mm_str = str(to_mm(sample_via.diameter * 4))
+        else:
+            via_dia_mm_str = str(DEFAULT_VIA_DIAMETER_MM)
+            viar_drill_mm_str = str(DEFAULT_DRILL_MM)
+            spacing_mm_str = str(DEFAULT_SPACING_MM)
+
+        self.via_dia = wx.TextCtrl(self, value=via_dia_mm_str)
+        self.drill = wx.TextCtrl(self, value=viar_drill_mm_str)
+        self.spacing = wx.TextCtrl(self, value=spacing_mm_str)
 
         self.pattern = wx.Choice(self, choices=PATTERNS)
         self.pattern.SetSelection(PATTERNS.index(DEFAULT_PATTERN))
 
-        add_row("Via Diameter (mm):", self.via_dia)
-        add_row("Drill (mm):", self.drill)
-        add_row("Spacing (mm):", self.spacing)
-        add_row("Net Name:", self.net)
-        add_row("Pattern:", self.pattern)
+        # if sample via layer starts in an odd layer then it starts with an offset
+        if sample_via and sample_via_start_layer % 2 == 0:
+            x_offset_mm_str = str(to_mm(sample_via.diameter * 2))
+            y_offset_mm_str = str(to_mm(sample_via.diameter * 2))
+        else:
+            x_offset_mm_str = str(to_mm(0.0))
+            y_offset_mm_str = str(to_mm(0.0))
 
-        self.avoid_zones = wx.CheckBox(self, label="Avoid other nets' zones")
+        self.x_offset = wx.TextCtrl(self, value=x_offset_mm_str)
+        self.y_offset = wx.TextCtrl(self, value=y_offset_mm_str)
+        offset_tip = (
+            "Shifts this run's grid, so a second pass (e.g. a back-side "
+            "microvia stitch) doesn't land on top of the first."
+        )
+        self.x_offset.SetToolTip(offset_tip)
+        self.y_offset.SetToolTip(offset_tip)
+
+        names = list(net_names)
+        self.net = wx.ComboBox(self, choices=names, style=wx.CB_DROPDOWN)
+        if sample_via:
+            self.net.SetValue(sample_via_net_name)
+        else:
+            if DEFAULT_NET in names:
+                self.net.SetValue(DEFAULT_NET)
+            elif names:
+                self.net.SetSelection(0)
+
+        self.avoid_zones = wx.CheckBox(self, label="Avoid zones of other nets")
         self.avoid_zones.SetValue(DEFAULT_AVOID_OTHER_ZONES)
         self.avoid_zones.SetToolTip(
             "Keep vias out of other nets' filled copper on every layer.\n\n"
@@ -616,23 +833,163 @@ class ViaStitchingDialog(wx.Dialog):
             "is a normal use of via stitching, and this would block it."
         )
 
+        self.main_sizer = wx.BoxSizer(wx.VERTICAL)
+
+        self._make_group(self.main_sizer, [
+            ("Via Type:", self.via_type),
+            ("Start Layer:", self.start_layer),
+            ("End Layer:", self.end_layer),
+            ("Via Diameter (mm):", self.via_dia),
+            ("Drill (mm):", self.drill)
+        ])
+
+        self._make_group(self.main_sizer, [
+            ("Via Pattern:", self.pattern),
+            ("Spacing (mm):", self.spacing),
+            ("X-Offset (mm):", self.x_offset),
+            ("Y-Offset (mm):", self.y_offset),
+            ("Zones:", self.avoid_zones),
+            ("Footprints:", self.avoid_footprints)
+        ])
+
+        self._make_group(self.main_sizer, [
+            ("Net Name:", self.net)
+        ])
+
+        # CreateButtonSizer, not a hand-built one: it orders OK/Cancel to match
+        # the platform's own convention (OK-then-Cancel on Windows) instead of
+        # a fixed left-to-right order that only matches some platforms.
         buttons = self.CreateButtonSizer(wx.OK | wx.CANCEL)
 
+        self.main_sizer.AddSpacer(15)
+        self.main_sizer.Add(buttons, 0, wx.EXPAND)
+
         outer = wx.BoxSizer(wx.VERTICAL)
-        outer.Add(grid, 1, wx.EXPAND | wx.ALL, 12)
-        outer.Add(self.avoid_zones, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, 12)
-        outer.Add(self.avoid_footprints, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, 12)
-        outer.Add(buttons, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, 12)
+        outer.Add(self.main_sizer, 1, wx.EXPAND | wx.ALL, 8)
         self.SetSizerAndFit(outer)
+
+        # Constrain Start/End Layer and the offsets to what the initial via
+        # type (Through by default, or the preselected via's type) actually
+        # supports.
+        self._refresh_layer_controls()
+
+    def _layer_domains(self, via_type_name):
+        """(start_choices, end_choices_for(start_name)) layer names for a via type.
+
+        Through is always the full board; a microvia's end is whichever inner
+        layer sits next to the outer layer picked as start; Blind starts on an
+        outer layer and ends anywhere inside; Buried stays inside; Blind/Buried
+        keeps the original free-for-all since it has no fixed span shape.
+        """
+        names = self._all_layer_names
+        outer = [names[0], names[-1]]
+        inner = names[1:-1]
+
+        if via_type_name == "Through":
+            return [names[0]], lambda start: [names[-1]]
+
+        if via_type_name == "Micro":
+            def micro_end(start):
+                if len(names) < 3:
+                    return []
+                if start == names[0]:
+                    return [names[1]]
+                if start == names[-1]:
+                    return [names[-2]]
+                return []
+            return outer, micro_end
+
+        if via_type_name == "Blind":
+            return outer, lambda start: inner
+
+        if via_type_name == "Buried":
+            return inner, lambda start: inner
+
+        return names, lambda start: names  # Blind/Buried: arbitrary layers
+
+    def _set_layer_combo_choices(self, combo, names, keep):
+        """Repopulate a layer BitmapComboBox, keeping `keep` selected if still valid."""
+        combo.Clear()
+        for name in names:
+            rgb = self._layer_colors.get(self.layer_map[name], (128, 128, 128))
+            combo.Append(name, _color_swatch(rgb))
+        if names:
+            combo.SetStringSelection(keep if keep in names else names[0])
+        combo.Enable(len(names) > 1)
+
+    def _refresh_layer_controls(self):
+        """Make the selected via type drive what's actually selectable.
+
+        Locks Start/End Layer to what the via type can physically be (a
+        Through via is always F.Cu/B.Cu, a microvia's end follows its start),
+        instead of leaving every layer pair pickable regardless of via type.
+        Also disables the offsets for Through, since a single-pass via has no
+        second pass to stagger against.
+        """
+        via_type_name = self.via_type.GetStringSelection()
+        start_choices, end_domain = self._layer_domains(via_type_name)
+
+        current_start = self.start_layer.GetStringSelection()
+        self._set_layer_combo_choices(self.start_layer, start_choices, current_start)
+        new_start = self.start_layer.GetStringSelection()
+
+        end_choices = end_domain(new_start)
+        current_end = self.end_layer.GetStringSelection()
+        if current_end not in end_choices:
+            current_end = end_choices[0] if end_choices else None
+        if current_end == new_start and len(end_choices) > 1:
+            # Same-layer default (e.g. Buried offers identical start/end lists)
+            # would just bounce back as a "must not be the same" error, so
+            # steer the default end away from whatever start landed on.
+            current_end = next(n for n in end_choices if n != new_start)
+        self._set_layer_combo_choices(self.end_layer, end_choices, current_end)
+
+        offsets_apply = via_type_name != "Through"
+        self.x_offset.Enable(offsets_apply)
+        self.y_offset.Enable(offsets_apply)
+        if not offsets_apply:
+            self.x_offset.SetValue("0.0")
+            self.y_offset.SetValue("0.0")
+
+    def _make_group(self, parent_sizer, rows):
+        """rows: list of (label, control) pairs."""
+        box = wx.StaticBoxSizer(wx.VERTICAL, self, "")
+        grid = wx.FlexGridSizer(0, 2, 5, 5)     # rows grow, 2 cols
+        grid.AddGrowableCol(1)
+        for label, ctrl in rows:
+            grid.Add(wx.StaticText(self, label=label), 0, wx.ALIGN_CENTER_VERTICAL)
+            grid.Add(ctrl, 1, wx.EXPAND)
+        box.Add(grid, 1, wx.EXPAND | wx.ALL, 5)
+        parent_sizer.Add(box, 0, wx.EXPAND | wx.ALL, 5)
 
     def values(self):
         """Validated dialog values. ValueError carries a user-facing message."""
+
+        via_type_name = self.via_type.GetStringSelection()
+        via_type = self.VIA_TYPE_CHOICES[via_type_name]
+
+        if not self.end_layer.GetStringSelection():
+            # Only reachable for Micro on a board with no inner copper layer:
+            # _layer_domains has no end-layer candidate to offer at all.
+            raise ValueError(
+                f"{via_type_name} vias need an inner copper layer, and this "
+                "board doesn't have one."
+            )
+
+        start_layer = self.layer_map[self.start_layer.GetStringSelection()]
+        end_layer = self.layer_map[self.end_layer.GetStringSelection()]
+
+        if start_layer == end_layer:
+            raise ValueError(f"Start and end layers must not be the same ({start_layer})")
+
         try:
             via_dia_mm = float(self.via_dia.GetValue())
             drill_mm = float(self.drill.GetValue())
             spacing_mm = float(self.spacing.GetValue())
+            x_offset_mm = float(self.x_offset.GetValue())
+            y_offset_mm = float(self.y_offset.GetValue())
         except ValueError:
-            raise ValueError("Via diameter, drill and spacing must be numbers (mm).")
+            raise ValueError("Via diameter, drill and spacing and offsets must be numbers (mm).")
 
         # isfinite first: nan parses fine as a float and then compares False
         # against everything, so it would slip past both checks below and only
@@ -656,11 +1013,16 @@ class ViaStitchingDialog(wx.Dialog):
             raise ValueError("Pick the net to stitch.")
 
         return {
+            "via_type": via_type,
+            "start_layer": start_layer,
+            "end_layer": end_layer,
             "via_dia_mm": via_dia_mm,
             "drill_mm": drill_mm,
             "spacing_mm": spacing_mm,
-            "net_name": net_name,
             "pattern": PATTERNS[self.pattern.GetSelection()],
+            "net_name": net_name,
+            "x_offset_mm": x_offset_mm,
+            "y_offset_mm": y_offset_mm,
             "avoid_other_zones": self.avoid_zones.GetValue(),
             "avoid_footprints": self.avoid_footprints.GetValue(),
         }
@@ -703,26 +1065,9 @@ def _api_enabled_in_config():
     "switched on after KiCad launched" both look like a refused connection from
     here. The setting on disk is what tells them apart.
     """
-    root = os.environ.get("KICAD_CONFIG_HOME")
-    if not root:
-        if sys.platform == "win32":
-            root = os.path.join(os.environ.get("APPDATA", ""), "kicad")
-        elif sys.platform == "darwin":
-            root = os.path.expanduser("~/Library/Preferences/kicad")
-        else:
-            root = os.path.join(
-                os.environ.get("XDG_CONFIG_HOME") or os.path.expanduser("~/.config"),
-                "kicad",
-            )
     try:
-        # Version subdirectories, newest first, so KiCad 11 wins over 10.
-        versions = sorted(
-            (d for d in os.listdir(root) if os.path.isdir(os.path.join(root, d))),
-            key=lambda d: [int(p) for p in d.split(".") if p.isdigit()] or [0],
-            reverse=True,
-        )
-        for name in versions:
-            path = os.path.join(root, name, "kicad_common.json")
+        for config_dir in _kicad_config_dirs():
+            path = os.path.join(config_dir, "kicad_common.json")
             if os.path.exists(path):
                 with open(path, encoding="utf-8") as fh:
                     return bool(json.load(fh).get("api", {}).get("enable_server"))
@@ -866,7 +1211,7 @@ def main():
     # The plugin runs as its own process. Give the dialog editor-attached window
     # behavior: no taskbar button on Windows, and a floating window that joins the
     # PCB editor's Stage Manager set on macOS.
-    dlg = ViaStitchingDialog(None, net_names)
+    dlg = ViaStitchingDialog(None, net_names, board)
     make_tool_window(dlg)
     attach_to_stage_manager(dlg)
     dlg.CentreOnScreen()
