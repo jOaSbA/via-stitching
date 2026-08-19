@@ -43,7 +43,8 @@ def test_hexagonal_grid():
     spacing = from_mm(2.0)
     pts = list(_grid_points(BOX, spacing, "Hexagonal"))
     rows = sorted({y for _, y in pts})
-    assert rows[1] - rows[0] == int(spacing * math.sqrt(3) / 2)
+    # round(), not int(): truncation biased the row pitch slightly short.
+    assert rows[1] - rows[0] == round(spacing * math.sqrt(3) / 2)
     # Odd rows are offset by half a pitch, which is what makes hex denser.
     odd_row_xs = {x for x, y in pts if y == rows[1]}
     assert min(odd_row_xs) == spacing // 2
@@ -64,7 +65,10 @@ def test_zero_spacing_terminates():
 
 
 def test_make_via():
-    via = _make_via(1000, 2000, from_mm(0.6), from_mm(0.3), Net())
+    via = _make_via(
+        1000, 2000, ViaType.VT_THROUGH, BoardLayer.BL_F_Cu, BoardLayer.BL_B_Cu,
+        from_mm(0.6), from_mm(0.3), Net(),
+    )
     layers = via.padstack.copper_layers
     assert len(layers) == 1
     assert layers[0].layer == BoardLayer.BL_F_Cu
@@ -78,6 +82,20 @@ def test_make_via():
     assert (via.position.x, via.position.y) == (1000, 2000)
 
 
+def test_make_via_microvia_spans_given_layers():
+    # Regression: only VT_THROUGH gets its drill span auto-filled by kipy's
+    # own Via.type setter, so a microvia's start/end layers must be set from
+    # what was actually asked for.
+    via = _make_via(
+        1000, 2000, ViaType.VT_MICRO, BoardLayer.BL_F_Cu, BoardLayer.BL_In1_Cu,
+        from_mm(0.25), from_mm(0.1), Net(),
+    )
+    assert via.type == ViaType.VT_MICRO
+    assert via.padstack.drill.start_layer == BoardLayer.BL_F_Cu
+    assert via.padstack.drill.end_layer == BoardLayer.BL_In1_Cu
+    assert via.drill_diameter == 100000
+
+
 def test_keepout_shapes_use_drill_not_copper():
     # Regression: _keepout_shapes must size clearance off the hole (drill), not the
     # copper pad/annular ring, or hole-to-hole spacing comes out far too generous.
@@ -85,13 +103,25 @@ def test_keepout_shapes_use_drill_not_copper():
 
     from kipy.board_types import PadType
 
-    via = SimpleNamespace(
-        position=SimpleNamespace(x=0, y=0),
-        diameter=from_mm(2.0),  # large copper diameter
-        drill_diameter=from_mm(0.3),  # small drill
+    full_span = [BoardLayer.BL_F_Cu, BoardLayer.BL_B_Cu]
+
+    def through_via(diameter, drill_diameter):
+        return SimpleNamespace(
+            position=SimpleNamespace(x=0, y=0),
+            diameter=diameter,
+            drill_diameter=drill_diameter,
+            padstack=SimpleNamespace(
+                drill=SimpleNamespace(
+                    start_layer=BoardLayer.BL_F_Cu, end_layer=BoardLayer.BL_B_Cu
+                )
+            ),
+        )
+
+    via = through_via(from_mm(2.0), from_mm(0.3))  # large copper, small drill
+    board = SimpleNamespace(
+        get_vias=lambda: [via], get_pads=lambda: [], get_enabled_layers=lambda: full_span
     )
-    board = SimpleNamespace(get_vias=lambda: [via], get_pads=lambda: [])
-    shapes = _keepout_shapes(board, from_mm(0.15))
+    shapes = _keepout_shapes(board, from_mm(0.15), full_span)
     assert len(shapes) == 1
     # bounds is a square [-r, -r, r, r]; r == via_radius + drill_radius + margin
     minx, miny, maxx, maxy = shapes[0].bounds
@@ -112,7 +142,7 @@ def test_keepout_shapes_use_drill_not_copper():
 
     round_pad = pth_pad(from_mm(0.3), from_mm(0.3))
     board_pad_only = SimpleNamespace(get_vias=lambda: [], get_pads=lambda: [round_pad])
-    shapes2 = _keepout_shapes(board_pad_only, from_mm(0.15))
+    shapes2 = _keepout_shapes(board_pad_only, from_mm(0.15), full_span)
     _, _, maxx2, _ = shapes2[0].bounds
     assert abs(maxx2 - expected_r) < from_mm(0.01), (maxx2, expected_r)
 
@@ -120,9 +150,31 @@ def test_keepout_shapes_use_drill_not_copper():
     # leave a via sitting on the far end of the slot.
     slot_pad = pth_pad(from_mm(0.3), from_mm(3.0))
     board_slot = SimpleNamespace(get_vias=lambda: [], get_pads=lambda: [slot_pad])
-    _, _, maxx3, _ = _keepout_shapes(board_slot, from_mm(0.15))[0].bounds
+    _, _, maxx3, _ = _keepout_shapes(board_slot, from_mm(0.15), full_span)[0].bounds
     slot_r = from_mm(0.15) + from_mm(1.5) + from_mm(0.25)
     assert abs(maxx3 - slot_r) < from_mm(0.01), (maxx3, slot_r)
+
+    # Regression: a via whose span doesn't overlap the new via's span must not
+    # count as a keepout (e.g. a front microvia stack when placing a back one).
+    disjoint_via = SimpleNamespace(
+        position=SimpleNamespace(x=0, y=0),
+        diameter=from_mm(0.25),
+        drill_diameter=from_mm(0.1),
+        padstack=SimpleNamespace(
+            drill=SimpleNamespace(
+                start_layer=BoardLayer.BL_In2_Cu, end_layer=BoardLayer.BL_B_Cu
+            )
+        ),
+    )
+    board_disjoint = SimpleNamespace(
+        get_vias=lambda: [disjoint_via],
+        get_pads=lambda: [],
+        get_enabled_layers=lambda: [
+            BoardLayer.BL_F_Cu, BoardLayer.BL_In1_Cu, BoardLayer.BL_In2_Cu, BoardLayer.BL_B_Cu,
+        ],
+    )
+    front_span = [BoardLayer.BL_F_Cu, BoardLayer.BL_In1_Cu]
+    assert _keepout_shapes(board_disjoint, from_mm(0.15), front_span) == []
 
 
 def test_blocked_predicate_without_shapes_blocks_nothing():
@@ -385,6 +437,8 @@ def test_is_busy_recognises_kicads_busy_status():
 
 def test_dialogs_build():
     # The error dialog is the one thing that must never fail, so build it for real.
+    from types import SimpleNamespace
+
     import wx
 
     from via_stitching_action import ErrorDialog, ViaStitchingDialog
@@ -397,7 +451,19 @@ def test_dialogs_build():
     finally:
         err.Destroy()
 
-    dlg = ViaStitchingDialog(None, ["GND", "VCC"])
+    fake_layers = {
+        BoardLayer.BL_F_Cu: "F.Cu",
+        BoardLayer.BL_In1_Cu: "In1.Cu",
+        BoardLayer.BL_In2_Cu: "In2.Cu",
+        BoardLayer.BL_B_Cu: "B.Cu",
+    }
+    fake_board = SimpleNamespace(
+        get_enabled_layers=lambda: list(fake_layers.keys()),
+        get_layer_name=lambda layer: fake_layers[layer],
+        get_selection=lambda kind: [],
+    )
+
+    dlg = ViaStitchingDialog(None, ["GND", "VCC"], fake_board)
     try:
         assert dlg.values()["net_name"] == "GND"
 

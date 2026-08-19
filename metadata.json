@@ -2,7 +2,7 @@
   "$schema": "https://go.kicad.org/pcm/schemas/v1",
   "name": "Via Stitching",
   "description": "Stitch copper zones together with a grid of vias on a chosen net",
-  "description_full": "Fills the overlap of a net's copper zones (for example the top and bottom GND pours) with a grid of through vias, stitching the planes together.\n\nBuilt on KiCad's modern IPC API (kicad-python / kipy), so it keeps working on KiCad 11 and later, where the legacy SWIG pcbnew bindings are removed.\n\nFeatures:\n- Hexagonal, square, or staggered via patterns with configurable diameter, drill, and spacing.\n- Vias are placed only where the net is poured on every layer it occupies, inset enough to stay clear of other-net copper on those layers.\n- Tracks of other nets are avoided on every copper layer, since a through via's drill crosses the layers the pour never touches.\n- Rule areas that forbid vias are respected on every copper layer.\n- Existing via and pad drill holes are avoided with a hole-to-hole margin.\n- Clearances come from the board's netclasses.\n- Optional keepouts for other nets' filled zones and for footprint bodies.\n- All placed vias are bundled into a single named group so they can be deleted as a set.",
+  "description_full": "Fills the overlap of a net's copper zones (for example the top and bottom GND pours) with a grid of stitching vias, on whichever two copper layers you pick.\n\nBuilt on KiCad's modern IPC API (kicad-python / kipy), so it keeps working on KiCad 11 and later, where the legacy SWIG pcbnew bindings are removed.\n\nFeatures:\n- Through, Micro, Blind, Buried, and Blind/Buried via types, with Start/End Layer choices narrowed to what each type can actually be.\n- Select an existing via first to pre-fill the dialog with its type, layers, net, diameter, and drill.\n- Hexagonal, square, or staggered via patterns with configurable diameter, drill, and spacing.\n- X/Y offset, for stitching more than one via pattern onto the same net and area (for example a separate front-side and back-side microvia pass) without them landing on top of each other.\n- Vias are placed only where the net is poured on the layers the via connects, inset enough to stay clear of other-net copper on those layers.\n- Tracks of other nets are avoided on every copper layer, since a via's drill can cross layers the pour never touches.\n- Rule areas that forbid vias are respected on every copper layer.\n- Existing via and pad drill holes are avoided with a hole-to-hole margin, scoped to vias whose layer span overlaps the new one's.\n- Clearances come from the board's netclasses.\n- Optional keepouts for other nets' filled zones and for footprint bodies.\n- All placed vias are bundled into a single named group so they can be deleted as a set.",
   "identifier": "com.github.jOaSbA.via-stitching",
   "type": "plugin",
   "author": {
@@ -63,6 +63,16 @@
       "download_sha256": "0bd8916d1c75e8565c55615964313f290daa24f2a9c9b64306b9b4283ca4a67a",
       "download_size": 28773,
       "install_size": 55323
+    },
+    {
+      "version": "2.0.0",
+      "status": "stable",
+      "kicad_version": "10.0",
+      "runtime": "ipc",
+      "download_url": "https://github.com/jOaSbA/via-stitching/releases/download/v2.0.0/via-stitching-2.0.0.zip",
+      "download_sha256": "37f5f69abdfe78873ed5d0c9488e4eb94afc10a0b0265b48870c5e0a9691968e",
+      "download_size": 33575,
+      "install_size": 72422
     }
   ]
 }
