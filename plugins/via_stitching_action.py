@@ -211,14 +211,58 @@ def _polygon_with_holes_to_shapely(pwh):
     return poly if (not poly.is_empty) else None
 
 
+def _copper_layer_order(board):
+    """Enabled copper layers, physically ordered front to back."""
+    enabled = set(board.get_enabled_layers())
+    return [l for l in iter_copper_layers() if l in enabled]
+
+
 def _span_layers(board, start_layer, end_layer):
     """All enabled copper layers between start and end, inclusive, in stackup order."""
-    enabled = set(board.get_enabled_layers())
-    order = [l for l in iter_copper_layers() if l in enabled]
+    order = _copper_layer_order(board)
     i, j = order.index(start_layer), order.index(end_layer)
     if i > j:
         i, j = j, i          # user may have picked them "upside down"
     return order[i:j + 1]
+
+
+def _via_type_advisory(board, via_type, start_layer, end_layer):
+    """A plain-language warning if this via type/layer combination isn't the
+    standard shape for that type, or None if it looks normal.
+
+    Never blocks anything by itself - via type is a label for what KiCad
+    should treat the via as, not a hard constraint on which layers can be
+    picked (some real vias intentionally don't match the "standard" shape,
+    e.g. stitching two ground planes through an intermediate signal layer).
+    This is what the confirm-or-cancel prompt in main() shows before
+    committing, so a genuine mistake still gets caught, just after the fact
+    rather than by disabling the fields outright.
+    """
+    order = _copper_layer_order(board)
+    outer = {order[0], order[-1]}
+    starts_outer = start_layer in outer
+    ends_outer = end_layer in outer
+
+    if via_type == ViaType.VT_MICRO:
+        if not (starts_outer or ends_outer) or len(_span_layers(board, start_layer, end_layer)) != 2:
+            return (
+                "This isn't a standard microvia: a microvia connects an "
+                "outer layer (F.Cu or B.Cu) to the layer right next to it. "
+                "KiCad's DRC will likely flag this via."
+            )
+    elif via_type == ViaType.VT_BLIND:
+        if not (starts_outer or ends_outer):
+            return (
+                "This isn't a standard blind via: a blind via starts on an "
+                "outer layer (F.Cu or B.Cu)."
+            )
+    elif via_type == ViaType.VT_BURIED:
+        if starts_outer or ends_outer:
+            return (
+                "This isn't a standard buried via: a buried via stays "
+                "between two inner layers, not F.Cu or B.Cu."
+            )
+    return None
 
 
 def _layer_region(zones, net_name):
@@ -880,44 +924,9 @@ class ViaStitchingDialog(wx.Dialog):
         outer.Add(self.main_sizer, 1, wx.EXPAND | wx.ALL, 8)
         self.SetSizerAndFit(outer)
 
-        # Constrain Start/End Layer and the offsets to what the initial via
-        # type (Through by default, or the preselected via's type) actually
-        # supports.
+        # Lock Start/End Layer to F.Cu/B.Cu if the initial via type (Through
+        # by default, or the preselected via's type) is Through.
         self._refresh_layer_controls()
-
-    def _layer_domains(self, via_type_name):
-        """(start_choices, end_choices_for(start_name)) layer names for a via type.
-
-        Through is always the full board; a microvia's end is whichever inner
-        layer sits next to the outer layer picked as start; Blind starts on an
-        outer layer and ends anywhere inside; Buried stays inside; Blind/Buried
-        keeps the original free-for-all since it has no fixed span shape.
-        """
-        names = self._all_layer_names
-        outer = [names[0], names[-1]]
-        inner = names[1:-1]
-
-        if via_type_name == "Through":
-            return [names[0]], lambda start: [names[-1]]
-
-        if via_type_name == "Micro":
-            def micro_end(start):
-                if len(names) < 3:
-                    return []
-                if start == names[0]:
-                    return [names[1]]
-                if start == names[-1]:
-                    return [names[-2]]
-                return []
-            return outer, micro_end
-
-        if via_type_name == "Blind":
-            return outer, lambda start: inner
-
-        if via_type_name == "Buried":
-            return inner, lambda start: inner
-
-        return names, lambda start: names  # Blind/Buried: arbitrary layers
 
     def _set_layer_combo_choices(self, combo, names, keep):
         """Repopulate a layer BitmapComboBox, keeping `keep` selected if still valid."""
@@ -930,38 +939,30 @@ class ViaStitchingDialog(wx.Dialog):
         combo.Enable(len(names) > 1)
 
     def _refresh_layer_controls(self):
-        """Make the selected via type drive what's actually selectable.
-
-        Locks Start/End Layer to what the via type can physically be (a
-        Through via is always F.Cu/B.Cu, a microvia's end follows its start),
-        instead of leaving every layer pair pickable regardless of via type.
-        Also disables the offsets for Through, since a single-pass via has no
-        second pass to stagger against.
+        """Lock Start/End Layer to F.Cu/B.Cu for Through, since that's always
+        true by definition (kipy's own Via.type setter enforces it) - not a
+        preference, so there's nothing to lose by fixing it. Every other via
+        type is left fully free: via type is a label for what KiCad should
+        treat the via as, not a hard constraint on which layers can be
+        picked. A stricter version used to snap Start/End back to a
+        "standard" template on every change, which fought both pasting an
+        existing via's settings and deliberately atypical vias (e.g.
+        stitching two ground planes through an intermediate signal layer,
+        issue #7). `_via_type_advisory` catches a genuine mismatch instead,
+        as a confirm-or-cancel prompt before committing rather than by
+        disabling fields.
         """
-        via_type_name = self.via_type.GetStringSelection()
-        start_choices, end_domain = self._layer_domains(via_type_name)
-
-        current_start = self.start_layer.GetStringSelection()
-        self._set_layer_combo_choices(self.start_layer, start_choices, current_start)
-        new_start = self.start_layer.GetStringSelection()
-
-        end_choices = end_domain(new_start)
-        current_end = self.end_layer.GetStringSelection()
-        if current_end not in end_choices:
-            current_end = end_choices[0] if end_choices else None
-        if current_end == new_start and len(end_choices) > 1:
-            # Same-layer default (e.g. Buried offers identical start/end lists)
-            # would just bounce back as a "must not be the same" error, so
-            # steer the default end away from whatever start landed on.
-            current_end = next(n for n in end_choices if n != new_start)
-        self._set_layer_combo_choices(self.end_layer, end_choices, current_end)
-
-        offsets_apply = via_type_name != "Through"
-        self.x_offset.Enable(offsets_apply)
-        self.y_offset.Enable(offsets_apply)
-        if not offsets_apply:
-            self.x_offset.SetValue("0.0")
-            self.y_offset.SetValue("0.0")
+        names = self._all_layer_names
+        if self.via_type.GetStringSelection() == "Through":
+            self._set_layer_combo_choices(self.start_layer, [names[0]], names[0])
+            self._set_layer_combo_choices(self.end_layer, [names[-1]], names[-1])
+        else:
+            self._set_layer_combo_choices(
+                self.start_layer, names, self.start_layer.GetStringSelection()
+            )
+            self._set_layer_combo_choices(
+                self.end_layer, names, self.end_layer.GetStringSelection()
+            )
 
     def _make_group(self, parent_sizer, rows):
         """rows: list of (label, control) pairs."""
@@ -979,14 +980,6 @@ class ViaStitchingDialog(wx.Dialog):
 
         via_type_name = self.via_type.GetStringSelection()
         via_type = self.VIA_TYPE_CHOICES[via_type_name]
-
-        if not self.end_layer.GetStringSelection():
-            # Only reachable for Micro on a board with no inner copper layer:
-            # _layer_domains has no end-layer candidate to offer at all.
-            raise ValueError(
-                f"{via_type_name} vias need an inner copper layer, and this "
-                "board doesn't have one."
-            )
 
         start_layer = self.layer_map[self.start_layer.GetStringSelection()]
         end_layer = self.layer_map[self.end_layer.GetStringSelection()]
@@ -1240,6 +1233,14 @@ def main():
         _ENV.append(
             "Parameters: " + ", ".join(f"{k}={v}" for k, v in sorted(params.items()))
         )
+
+        advisory = _via_type_advisory(
+            board, params["via_type"], params["start_layer"], params["end_layer"]
+        )
+        if advisory:
+            style = wx.YES_NO | wx.ICON_WARNING | wx.STAY_ON_TOP
+            if wx.MessageBox(advisory + "\n\nContinue anyway?", "Via Stitching", style, dlg) != wx.YES:
+                return
 
         busy = wx.BusyCursor()
         try:
