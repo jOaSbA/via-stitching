@@ -12,28 +12,24 @@
 import json
 import math
 import os
+import re
 import sys
 import traceback
 from collections import defaultdict
-import json
-import re
 from pathlib import Path
+
 import wx
 import wx.adv
 
 from kipy import KiCad
 from kipy.errors import ApiError, ConnectionError as KiCadConnectionError
 from kipy.proto.common import ApiStatusCode
-from kipy.board_types import Group, Via, ArcTrack, BoardLayer, PadType, PSS_CIRCLE
-from kipy.geometry import Vector2
-from kipy.util import from_mm
-from kipy.proto.board.board_types_pb2 import ViaType
-from kipy.util.board_layer import is_copper_layer, canonical_name
-from kipy.board_types import Via
 from kipy.proto.common.types import KiCadObjectType
-from kipy.util.units import to_mm, from_mm
-from kipy.util.board_layer import is_copper_layer, iter_copper_layers
-from kipy.proto.board.board_types_pb2 import BoardLayer as BL
+from kipy.proto.board.board_types_pb2 import BoardLayer as BL, ViaType
+from kipy.board_types import Group, Via, ArcTrack, PadType, PSS_CIRCLE
+from kipy.geometry import Vector2
+from kipy.util.units import from_mm, to_mm
+from kipy.util.board_layer import iter_copper_layers
 
 # Make the sibling helper modules importable regardless of how KiCad launches us.
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -97,6 +93,38 @@ def _kipy_version():
         return "unknown"
 
 
+def _kicad_config_dirs():
+    """KiCad's per-version config directories, newest version first.
+
+    KiCad keeps per-version settings (kicad_common.json, pcbnew.json,
+    colors/) under one directory per platform. Shared by
+    _api_enabled_in_config and _layer_colors so there's exactly one place
+    that knows where KiCad's config lives on each OS, instead of each caller
+    hardcoding its own (previously Linux-only) guess.
+    """
+    root = os.environ.get("KICAD_CONFIG_HOME")
+    if not root:
+        if sys.platform == "win32":
+            root = os.path.join(os.environ.get("APPDATA", ""), "kicad")
+        elif sys.platform == "darwin":
+            root = os.path.expanduser("~/Library/Preferences/kicad")
+        else:
+            root = os.path.join(
+                os.environ.get("XDG_CONFIG_HOME") or os.path.expanduser("~/.config"),
+                "kicad",
+            )
+    try:
+        # Version subdirectories, newest first, so KiCad 11 wins over 10.
+        versions = sorted(
+            (d for d in os.listdir(root) if os.path.isdir(os.path.join(root, d))),
+            key=lambda d: [int(p) for p in d.split(".") if p.isdigit()] or [0],
+            reverse=True,
+        )
+    except Exception:
+        return []
+    return [os.path.join(root, name) for name in versions]
+
+
 # KiCad default theme copper colors (fallback)
 _DEFAULT_COPPER = {
     "f": (200, 52, 52), "in1": (127, 200, 127), "in2": (206, 125, 66),
@@ -116,13 +144,17 @@ def _layer_colors():
     """{BoardLayer: (r, g, b)} from the active KiCad color theme, with fallbacks."""
     copper = dict(_DEFAULT_COPPER)
     try:
-        cfg = Path.home() / ".config/kicad/10.0"
-        theme = json.loads((cfg / "pcbnew.json").read_text())["appearance"]["color_theme"]
-        data = json.loads((cfg / "colors" / f"{theme}.json").read_text())
-        for key, val in data.get("board", {}).get("copper", {}).items():
-            m = re.match(r"rgba?\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)", val)
-            if m:
-                copper[key.lower()] = tuple(map(int, m.groups()))
+        for config_dir in _kicad_config_dirs():
+            pcbnew_json = Path(config_dir) / "pcbnew.json"
+            if not pcbnew_json.exists():
+                continue
+            theme = json.loads(pcbnew_json.read_text())["appearance"]["color_theme"]
+            data = json.loads((Path(config_dir) / "colors" / f"{theme}.json").read_text())
+            for key, val in data.get("board", {}).get("copper", {}).items():
+                m = re.match(r"rgba?\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)", val)
+                if m:
+                    copper[key.lower()] = tuple(map(int, m.groups()))
+            break  # newest version dir with a pcbnew.json wins
     except Exception:
         pass  # built-in theme or unreadable config: defaults stand
     out = {}
@@ -652,7 +684,7 @@ def stitch(
 class ViaStitchingDialog(wx.Dialog):
     """The 'Via Stitching Parameters' input dialog."""
 
-    def __init__(self, parent, net_names):
+    def __init__(self, parent, net_names, board):
         super().__init__(
             parent,
             title="Via Stitching Parameters",
@@ -665,15 +697,23 @@ class ViaStitchingDialog(wx.Dialog):
         if os.path.exists(icon_path):
             self.SetIcon(wx.Icon(icon_path, wx.BITMAP_TYPE_PNG))
 
-        board = KiCad().get_board()
+        # Default tooltip auto-pop is ~5s, too short for the multi-paragraph
+        # tooltips below. This is a process-global wx setting, so one call here
+        # covers every tooltip in the dialog. Windows' native tooltip control
+        # takes this as a signed 16-bit delay (TTM_SETDELAYTIME): anything at
+        # or above 32768 wraps around and comes back *shorter* than the
+        # default, which is why 60000 didn't actually help. 32000 is the
+        # longest value that doesn't wrap.
+        wx.ToolTip.SetAutoPop(32000)
 
         enabled = set(board.get_enabled_layers())
         copper_layer_ids = [l for l in iter_copper_layers() if l in enabled]
         self.layer_map   = {board.get_layer_name(l): l for l in copper_layer_ids}
         self.layer_names = {v: k for k, v in self.layer_map.items()}
         copper_layer_names = list(self.layer_map.keys())
-        layer_colors = _layer_colors()
-
+        self._all_layer_names = copper_layer_names  # physical order, front to back
+        self._layer_colors = _layer_colors()
+        layer_colors = self._layer_colors
 
         self.VIA_TYPE_CHOICES = {
             "Through":      ViaType.VT_THROUGH,
@@ -686,17 +726,12 @@ class ViaStitchingDialog(wx.Dialog):
         self.VIA_TYPE_NAMES = {v: k for k, v in self.VIA_TYPE_CHOICES.items()}   # int -> name
 
         selected_vias = board.get_selection(KiCadObjectType.KOT_PCB_VIA)
-        # selected_vias = board.get_selection(Via)
         sample_via = None
         if selected_vias:
             sample_via = selected_vias[0]
-            sample_via_type_name = self.VIA_TYPE_CHOICES.get(sample_via.type, "Unknown")
             sample_via_start_layer = sample_via.padstack.drill.start_layer
             sample_via_end_layer = sample_via.padstack.drill.end_layer
-            sample_via_net = sample_via.net
-            sample_via_net_name = sample_via_net.name
-            sample_via_diameter = sample_via.diameter
-            sample_via_drill = sample_via.drill_diameter
+            sample_via_net_name = sample_via.net.name
 
         grid = wx.FlexGridSizer(cols=2, vgap=5, hgap=5)
         grid.AddGrowableCol(1)
@@ -711,6 +746,7 @@ class ViaStitchingDialog(wx.Dialog):
             self.via_type.SetStringSelection(self.VIA_TYPE_NAMES.get(sample_via.type))
         else:
             self.via_type.SetSelection(0)
+        self.via_type.Bind(wx.EVT_CHOICE, lambda evt: self._refresh_layer_controls())
 
         def _layer_combo():
             combo = wx.adv.BitmapComboBox(self, style=wx.CB_READONLY)
@@ -729,18 +765,9 @@ class ViaStitchingDialog(wx.Dialog):
             self.end_layer.SetStringSelection(self.layer_names[sample_via_end_layer])
         else:
             self.end_layer.SetSelection(len(copper_layer_names) - 1)
-
-        # self.start_layer = wx.Choice(self, choices=copper_layer_names)
-        # if sample_via:
-        #     self.start_layer.SetStringSelection(self.layer_names[sample_via_start_layer])
-        # else:
-        #     self.start_layer.SetSelection(0)
-
-        # self.end_layer = wx.Choice(self, choices=copper_layer_names)
-        # if sample_via:
-        #     self.end_layer.SetStringSelection(self.layer_names[sample_via_end_layer])
-        # else:
-        #     self.end_layer.SetSelection(len(copper_layer_names) - 1)
+        # Micro's end layer is derived from which outer layer the start is, so
+        # changing the start has to re-derive it.
+        self.start_layer.Bind(wx.EVT_COMBOBOX, lambda evt: self._refresh_layer_controls())
 
         if sample_via:
             via_dia_mm_str = str(to_mm(sample_via.diameter))
@@ -768,6 +795,12 @@ class ViaStitchingDialog(wx.Dialog):
 
         self.x_offset = wx.TextCtrl(self, value=x_offset_mm_str)
         self.y_offset = wx.TextCtrl(self, value=y_offset_mm_str)
+        offset_tip = (
+            "Shifts this run's grid, so a second pass (e.g. a back-side "
+            "microvia stitch) doesn't land on top of the first."
+        )
+        self.x_offset.SetToolTip(offset_tip)
+        self.y_offset.SetToolTip(offset_tip)
 
         names = list(net_names)
         self.net = wx.ComboBox(self, choices=names, style=wx.CB_DROPDOWN)
@@ -802,7 +835,7 @@ class ViaStitchingDialog(wx.Dialog):
 
         self.main_sizer = wx.BoxSizer(wx.VERTICAL)
 
-        self._make_group(self.main_sizer, "", [
+        self._make_group(self.main_sizer, [
             ("Via Type:", self.via_type),
             ("Start Layer:", self.start_layer),
             ("End Layer:", self.end_layer),
@@ -810,7 +843,7 @@ class ViaStitchingDialog(wx.Dialog):
             ("Drill (mm):", self.drill)
         ])
 
-        self._make_group(self.main_sizer, "", [
+        self._make_group(self.main_sizer, [
             ("Via Pattern:", self.pattern),
             ("Spacing (mm):", self.spacing),
             ("X-Offset (mm):", self.x_offset),
@@ -819,32 +852,108 @@ class ViaStitchingDialog(wx.Dialog):
             ("Footprints:", self.avoid_footprints)
         ])
 
-        self._make_group(self.main_sizer, "", [
+        self._make_group(self.main_sizer, [
             ("Net Name:", self.net)
         ])
 
-
-
-        btn_ok = wx.Button(self, wx.ID_OK)
-        btn_cancel = wx.Button(self, wx.ID_CANCEL)
-
-        btns = wx.BoxSizer(wx.HORIZONTAL)
-        btns.AddStretchSpacer(1)
-        btns.Add(btn_cancel, 0)
-        btns.AddSpacer(20)
-        btns.Add(btn_ok, 0)
-        btns.AddSpacer(5)
+        # CreateButtonSizer, not a hand-built one: it orders OK/Cancel to match
+        # the platform's own convention (OK-then-Cancel on Windows) instead of
+        # a fixed left-to-right order that only matches some platforms.
+        buttons = self.CreateButtonSizer(wx.OK | wx.CANCEL)
 
         self.main_sizer.AddSpacer(15)
-        self.main_sizer.Add(btns, 0, wx.EXPAND)
+        self.main_sizer.Add(buttons, 0, wx.EXPAND)
 
         outer = wx.BoxSizer(wx.VERTICAL)
         outer.Add(self.main_sizer, 1, wx.EXPAND | wx.ALL, 8)
         self.SetSizerAndFit(outer)
 
-    def _make_group(self, parent_sizer, title, rows):
+        # Constrain Start/End Layer and the offsets to what the initial via
+        # type (Through by default, or the preselected via's type) actually
+        # supports.
+        self._refresh_layer_controls()
+
+    def _layer_domains(self, via_type_name):
+        """(start_choices, end_choices_for(start_name)) layer names for a via type.
+
+        Through is always the full board; a microvia's end is whichever inner
+        layer sits next to the outer layer picked as start; Blind starts on an
+        outer layer and ends anywhere inside; Buried stays inside; Blind/Buried
+        keeps the original free-for-all since it has no fixed span shape.
+        """
+        names = self._all_layer_names
+        outer = [names[0], names[-1]]
+        inner = names[1:-1]
+
+        if via_type_name == "Through":
+            return [names[0]], lambda start: [names[-1]]
+
+        if via_type_name == "Micro":
+            def micro_end(start):
+                if len(names) < 3:
+                    return []
+                if start == names[0]:
+                    return [names[1]]
+                if start == names[-1]:
+                    return [names[-2]]
+                return []
+            return outer, micro_end
+
+        if via_type_name == "Blind":
+            return outer, lambda start: inner
+
+        if via_type_name == "Buried":
+            return inner, lambda start: inner
+
+        return names, lambda start: names  # Blind/Buried: arbitrary layers
+
+    def _set_layer_combo_choices(self, combo, names, keep):
+        """Repopulate a layer BitmapComboBox, keeping `keep` selected if still valid."""
+        combo.Clear()
+        for name in names:
+            rgb = self._layer_colors.get(self.layer_map[name], (128, 128, 128))
+            combo.Append(name, _color_swatch(rgb))
+        if names:
+            combo.SetStringSelection(keep if keep in names else names[0])
+        combo.Enable(len(names) > 1)
+
+    def _refresh_layer_controls(self):
+        """Make the selected via type drive what's actually selectable.
+
+        Locks Start/End Layer to what the via type can physically be (a
+        Through via is always F.Cu/B.Cu, a microvia's end follows its start),
+        instead of leaving every layer pair pickable regardless of via type.
+        Also disables the offsets for Through, since a single-pass via has no
+        second pass to stagger against.
+        """
+        via_type_name = self.via_type.GetStringSelection()
+        start_choices, end_domain = self._layer_domains(via_type_name)
+
+        current_start = self.start_layer.GetStringSelection()
+        self._set_layer_combo_choices(self.start_layer, start_choices, current_start)
+        new_start = self.start_layer.GetStringSelection()
+
+        end_choices = end_domain(new_start)
+        current_end = self.end_layer.GetStringSelection()
+        if current_end not in end_choices:
+            current_end = end_choices[0] if end_choices else None
+        if current_end == new_start and len(end_choices) > 1:
+            # Same-layer default (e.g. Buried offers identical start/end lists)
+            # would just bounce back as a "must not be the same" error, so
+            # steer the default end away from whatever start landed on.
+            current_end = next(n for n in end_choices if n != new_start)
+        self._set_layer_combo_choices(self.end_layer, end_choices, current_end)
+
+        offsets_apply = via_type_name != "Through"
+        self.x_offset.Enable(offsets_apply)
+        self.y_offset.Enable(offsets_apply)
+        if not offsets_apply:
+            self.x_offset.SetValue("0.0")
+            self.y_offset.SetValue("0.0")
+
+    def _make_group(self, parent_sizer, rows):
         """rows: list of (label, control) pairs."""
-        box = wx.StaticBoxSizer(wx.VERTICAL, self, title)
+        box = wx.StaticBoxSizer(wx.VERTICAL, self, "")
         grid = wx.FlexGridSizer(0, 2, 5, 5)     # rows grow, 2 cols
         grid.AddGrowableCol(1)
         for label, ctrl in rows:
@@ -853,11 +962,20 @@ class ViaStitchingDialog(wx.Dialog):
         box.Add(grid, 1, wx.EXPAND | wx.ALL, 5)
         parent_sizer.Add(box, 0, wx.EXPAND | wx.ALL, 5)
 
-
     def values(self):
         """Validated dialog values. ValueError carries a user-facing message."""
 
-        via_type = self.VIA_TYPE_CHOICES[self.via_type.GetStringSelection()]
+        via_type_name = self.via_type.GetStringSelection()
+        via_type = self.VIA_TYPE_CHOICES[via_type_name]
+
+        if not self.end_layer.GetStringSelection():
+            # Only reachable for Micro on a board with no inner copper layer:
+            # _layer_domains has no end-layer candidate to offer at all.
+            raise ValueError(
+                f"{via_type_name} vias need an inner copper layer, and this "
+                "board doesn't have one."
+            )
+
         start_layer = self.layer_map[self.start_layer.GetStringSelection()]
         end_layer = self.layer_map[self.end_layer.GetStringSelection()]
 
@@ -947,26 +1065,9 @@ def _api_enabled_in_config():
     "switched on after KiCad launched" both look like a refused connection from
     here. The setting on disk is what tells them apart.
     """
-    root = os.environ.get("KICAD_CONFIG_HOME")
-    if not root:
-        if sys.platform == "win32":
-            root = os.path.join(os.environ.get("APPDATA", ""), "kicad")
-        elif sys.platform == "darwin":
-            root = os.path.expanduser("~/Library/Preferences/kicad")
-        else:
-            root = os.path.join(
-                os.environ.get("XDG_CONFIG_HOME") or os.path.expanduser("~/.config"),
-                "kicad",
-            )
     try:
-        # Version subdirectories, newest first, so KiCad 11 wins over 10.
-        versions = sorted(
-            (d for d in os.listdir(root) if os.path.isdir(os.path.join(root, d))),
-            key=lambda d: [int(p) for p in d.split(".") if p.isdigit()] or [0],
-            reverse=True,
-        )
-        for name in versions:
-            path = os.path.join(root, name, "kicad_common.json")
+        for config_dir in _kicad_config_dirs():
+            path = os.path.join(config_dir, "kicad_common.json")
             if os.path.exists(path):
                 with open(path, encoding="utf-8") as fh:
                     return bool(json.load(fh).get("api", {}).get("enable_server"))
@@ -1110,7 +1211,7 @@ def main():
     # The plugin runs as its own process. Give the dialog editor-attached window
     # behavior: no taskbar button on Windows, and a floating window that joins the
     # PCB editor's Stage Manager set on macOS.
-    dlg = ViaStitchingDialog(None, net_names)
+    dlg = ViaStitchingDialog(None, net_names, board)
     make_tool_window(dlg)
     attach_to_stage_manager(dlg)
     dlg.CentreOnScreen()
