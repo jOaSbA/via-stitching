@@ -42,17 +42,18 @@ and restart the PCB editor.
    settings is a matter of selecting it and running the plugin.
 3. Run Via Stitching and set:
    - Via Type: Through, Micro, Blind, Buried, or Blind/Buried. Start Layer and
-     End Layer narrow to what the chosen type can actually be (a Through via
-     is always F.Cu/B.Cu; a microvia's end layer follows automatically once
-     you pick which outer layer it starts on).
+     End Layer are free for every type except Through, which is always
+     F.Cu/B.Cu. Picking a combination that isn't the standard shape for the
+     chosen type (say a microvia that doesn't touch an outer layer) doesn't
+     block you, but shows a confirm-or-cancel prompt explaining why before
+     it places anything.
    - Via Diameter (mm) and Drill (mm) for the via size.
    - Via Pattern: Hexagonal (densest), Square, or Staggered, and Spacing (mm)
      for the centre-to-centre grid pitch.
    - X-Offset / Y-Offset (mm), for shifting the grid on a second pass so it
-     doesn't land on top of a first one. Only relevant when stitching more
-     than one via pattern onto the same net and area, for example a separate
-     front-side and back-side microvia pass; disabled for Through vias, which
-     only need one pass.
+     doesn't land on top of a first one. Useful when stitching more than one
+     via pattern onto the same net and area, for example a separate
+     front-side and back-side microvia pass.
    - Net Name, the net to stitch (defaults to `GND`).
    - Avoid zones of other nets, off by default. See below.
    - Avoid footprints, off by default. Keeps vias out from under component
