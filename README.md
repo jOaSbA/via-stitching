@@ -80,12 +80,15 @@ There's no clearance field, on purpose. Five things keep the vias legal:
   KiCad has already pulled those fills back by the board clearance, so the inset
   keeps the via off other-net copper *on those layers*.
 - **Other nets' tracks.** The inset says nothing about layers the net isn't
-  poured on, and a through via's drill crosses those too, so tracks of other nets
-  are avoided on every copper layer. This is unconditional: a via sitting on
-  another net's track is a real DRC violation.
-- **Rule areas.** A rule area that forbids vias is respected on every copper
-  layer, whichever layers it was drawn on, since a through via crosses all of
-  them.
+  poured on, and a via's drill crosses whatever copper layers it spans, so
+  tracks of other nets are avoided on every layer within that span. This is
+  unconditional: a via sitting on another net's track is a real DRC violation.
+  A through via spans the whole board, so this still means every layer for it;
+  a microvia or blind/buried via only checks the layers it actually connects.
+- **Rule areas.** A rule area that forbids vias is respected on every layer
+  within the via's span, whichever layers it was drawn on. Same as above: a
+  through via crosses the whole board, a microvia or blind/buried via only
+  crosses the layers it spans.
 - **Existing holes.** Via and pad drills are avoided with a 0.25 mm
   hole-to-hole margin. A milled slot is measured across its long axis. An
   existing via only counts if its own layer span overlaps the new via's, so a

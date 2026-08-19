@@ -217,7 +217,8 @@ def test_net_clearances_takes_the_larger_netclass_value():
 
 def test_track_keepout_skips_same_net_blocks_others():
     # Regression: a through via's drill spans every copper layer, so a track on
-    # a layer the stitched net never pours on must still block placement.
+    # a layer the stitched net never pours on must still block placement, as
+    # long as that layer is inside the via's own span.
     from types import SimpleNamespace
 
     from kipy.board_types import BoardLayer
@@ -237,17 +238,26 @@ def test_track_keepout_skips_same_net_blocks_others():
         width=from_mm(0.2),
     )
     board = SimpleNamespace(get_tracks=lambda: [same_net_track, other_net_track])
+    full_span = [BoardLayer.BL_F_Cu, BoardLayer.BL_In1_Cu, BoardLayer.BL_B_Cu]
 
     blocked = _blocked_predicate(
-        _track_keepout_shapes(board, "GND", from_mm(0.3), _fallback_clearances())
+        _track_keepout_shapes(board, "GND", from_mm(0.3), _fallback_clearances(), full_span)
     )
 
     # On the same net: not a keepout, even directly on the track.
     assert not blocked(from_mm(2.5), 0)
-    # On another net: blocked, even off the track's own layer (a through via
-    # passes through it regardless).
+    # On another net, on a layer the via's span does cover: blocked.
     assert blocked(from_mm(2.5), from_mm(1.0))
     assert not blocked(from_mm(2.5), from_mm(5.0))
+
+    # Regression (issue #7): a microvia or blind/buried via only spans some of
+    # the board's layers, so a track outside that span must not block it, even
+    # though a through via would have to avoid it.
+    narrow_span = [BoardLayer.BL_In1_Cu, BoardLayer.BL_B_Cu]  # excludes F.Cu
+    not_blocked = _blocked_predicate(
+        _track_keepout_shapes(board, "GND", from_mm(0.3), _fallback_clearances(), narrow_span)
+    )
+    assert not not_blocked(from_mm(2.5), from_mm(1.0))
 
 
 def test_zone_keepout_skips_same_net_blocks_others():
@@ -279,25 +289,41 @@ def test_zone_keepout_skips_same_net_blocks_others():
             ]
         },
     )
+    full_span = [BoardLayer.BL_F_Cu, BoardLayer.BL_In1_Cu, BoardLayer.BL_B_Cu]
 
     blocked = _blocked_predicate(
         _zone_keepout_shapes(
-            [same_net_zone, other_net_zone], "GND", from_mm(0.3), _fallback_clearances()
+            [same_net_zone, other_net_zone], "GND", from_mm(0.3), _fallback_clearances(),
+            full_span,
         )
     )
 
     # Same net: not a keepout, even well inside its own zone.
     assert not blocked(from_mm(2.5), from_mm(2.5))
-    # Other net, on a layer GND never pours on: blocked anyway, since a
-    # through via drills through it regardless of layer.
+    # Other net, on a layer GND never pours on but the via's span does cover:
+    # blocked, since a through via drills through it regardless of layer.
     assert blocked(from_mm(12.5), from_mm(2.5))
     assert not blocked(from_mm(30.0), from_mm(2.5))
+
+    # Regression (issue #7): a microvia or blind/buried via only spans some of
+    # the board's layers, so a zone filled outside that span must not block
+    # it, even though a through via would have to avoid it.
+    narrow_span = [BoardLayer.BL_F_Cu, BoardLayer.BL_B_Cu]  # excludes In1.Cu
+    not_blocked = _blocked_predicate(
+        _zone_keepout_shapes(
+            [same_net_zone, other_net_zone], "GND", from_mm(0.3), _fallback_clearances(),
+            narrow_span,
+        )
+    )
+    assert not not_blocked(from_mm(12.5), from_mm(2.5))
 
 
 def test_rule_area_keepout_blocks_via_keepouts_only():
     # Regression: a "no vias" rule area is an explicit instruction from whoever
     # laid the board out, and nothing used to consult it at all.
     from types import SimpleNamespace
+
+    from kipy.board_types import BoardLayer
 
     # Pin the proto field this reads through: kipy 0.7.1 wraps a zone's copper
     # settings but not its RuleAreaSettings, so a rename there would silently
@@ -309,7 +335,7 @@ def test_rule_area_keepout_blocks_via_keepouts_only():
     def node(x, y):
         return SimpleNamespace(has_point=True, has_arc=False, point=SimpleNamespace(x=x, y=y))
 
-    def rule_area(x0, y0, x1, y1, keepout_vias):
+    def rule_area(x0, y0, x1, y1, keepout_vias, layers=(BoardLayer.BL_F_Cu,)):
         outline = SimpleNamespace(
             nodes=[node(x0, y0), node(x1, y0), node(x1, y1), node(x0, y1)]
         )
@@ -317,6 +343,7 @@ def test_rule_area_keepout_blocks_via_keepouts_only():
         return SimpleNamespace(
             is_rule_area=lambda: True,
             outline=pwh,
+            layers=layers,
             proto=SimpleNamespace(
                 rule_area_settings=SimpleNamespace(keepout_vias=keepout_vias),
                 outline=SimpleNamespace(polygons=[pwh]),
@@ -328,10 +355,11 @@ def test_rule_area_keepout_blocks_via_keepouts_only():
         from_mm(10.0), 0, from_mm(15.0), from_mm(5.0), False
     )
     copper_zone = SimpleNamespace(is_rule_area=lambda: False)
+    full_span = [BoardLayer.BL_F_Cu, BoardLayer.BL_In1_Cu, BoardLayer.BL_B_Cu]
 
     blocked = _blocked_predicate(
         _rule_area_keepout_shapes(
-            [no_vias, other_restriction, copper_zone], from_mm(0.3)
+            [no_vias, other_restriction, copper_zone], from_mm(0.3), full_span
         )
     )
 
@@ -348,7 +376,19 @@ def test_rule_area_keepout_blocks_via_keepouts_only():
     # A rule area KiCad handed over without an outline must not raise.
     empty = rule_area(0, 0, from_mm(1.0), from_mm(1.0), True)
     empty.proto.outline.polygons = []
-    assert _rule_area_keepout_shapes([empty], from_mm(0.3)) == []
+    assert _rule_area_keepout_shapes([empty], from_mm(0.3), full_span) == []
+
+    # Regression (issue #7): a microvia or blind/buried via only spans some of
+    # the board's layers, so a rule area drawn entirely outside that span must
+    # not block it, even though a through via would have to avoid it.
+    inner_only = rule_area(
+        0, 0, from_mm(5.0), from_mm(5.0), True, layers=(BoardLayer.BL_In1_Cu,)
+    )
+    narrow_span = [BoardLayer.BL_F_Cu, BoardLayer.BL_B_Cu]  # excludes In1.Cu
+    not_blocked = _blocked_predicate(
+        _rule_area_keepout_shapes([inner_only], from_mm(0.3), narrow_span)
+    )
+    assert not not_blocked(from_mm(2.5), from_mm(2.5))
 
 
 def test_footprint_keepout_covers_bounding_box():
