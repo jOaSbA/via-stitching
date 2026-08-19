@@ -104,13 +104,6 @@ _DEFAULT_COPPER = {
     "in6": (40, 204, 217), "b": (77, 127, 196),
 }
 
-# KiCad default theme copper colors (fallback)
-_DEFAULT_COPPER = {
-    "f": (200, 52, 52), "in1": (127, 200, 127), "in2": (206, 125, 66),
-    "in3": (79, 203, 203), "in4": (219, 98, 139), "in5": (167, 165, 198),
-    "in6": (40, 204, 217), "b": (77, 127, 196),
-}
-
 def _copper_key_to_layer(key):
     if key == "f":
         return BL.BL_F_Cu
