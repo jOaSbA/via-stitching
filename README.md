@@ -8,7 +8,7 @@ It's built on KiCad's IPC API (`kicad-python` / `kipy`) rather than the old SWIG
 `pcbnew` bindings, so it keeps working on KiCad 11 and later, where those
 bindings are gone.
 
-![The Via Stitching parameters dialog](docs/dialog.png)
+![The Via Stitching parameters dialog](docs/dialog.png?v=2)
 
 ## Requirements
 
@@ -48,6 +48,8 @@ and restart the PCB editor.
      via stitching.
 3. Click OK. Vias go only where the net is poured on every layer it occupies,
    inset far enough to stay DRC-clean, and the zones are refilled for you.
+4. Alternatively, select an existing via or microvia before running the plugin.
+   its settings will be used to pre-fill the dialog.
 
 ### Grouping
 
