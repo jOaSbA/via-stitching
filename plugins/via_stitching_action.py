@@ -638,11 +638,21 @@ def stitch(
 
     # Grid before subtracting the keepout, so "grid too coarse" and "every position
     # is taken by an existing hole" get different messages. The grid is anchored to
-    # region.bounds, so it is not reproducible run to run.
+    # region.bounds (shifted by the offset), so it is not reproducible run to run.
+    #
+    # The offset shifts the bounds themselves, not the generated points: shifting
+    # points after generating them against the un-shifted bounds can only ever
+    # drop candidates that move outside the region, never add the candidates
+    # that only become valid once shifted, which silently undercounts a whole
+    # edge for any nonzero offset.
+    minx, miny, maxx, maxy = region.bounds
+    shifted_bounds = (
+        minx + x_offset_nm, miny + y_offset_nm, maxx + x_offset_nm, maxy + y_offset_nm,
+    )
     prepared = prep(region)
     candidates = [
         (x, y)
-        for (x, y) in _grid_points(region.bounds, spacing_nm, pattern)
+        for (x, y) in _grid_points(shifted_bounds, spacing_nm, pattern)
         if prepared.contains(Point(x, y))
     ]
     if not candidates:
@@ -665,11 +675,7 @@ def stitch(
         keepout += _footprint_keepout_shapes(board, net_name, via_radius_nm, clearances)
 
     blocked = _blocked_predicate(keepout)
-    points = [
-        (ox, oy)
-        for (ox, oy) in ((x + x_offset_nm, y + y_offset_nm) for (x, y) in candidates)
-        if prepared.contains(Point(ox, oy)) and not blocked(ox, oy)
-    ]
+    points = [(x, y) for (x, y) in candidates if not blocked(x, y)]
 
     if not points:
         # Only name the optional keepouts that are actually switched on, so this
