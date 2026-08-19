@@ -491,10 +491,6 @@ def stitch(
     from shapely.geometry import Point
     from shapely.prepared import prep
 
-    # via_type = via_type
-    # start_layer = start_layer
-    # end_layer = end_layer
-
     diameter_nm = from_mm(via_dia_mm)
     drill_nm = from_mm(drill_mm)
     spacing_nm = from_mm(spacing_mm)
@@ -575,15 +571,12 @@ def stitch(
     keepout = _keepout_shapes(board, via_radius_nm, span)
     keepout += _rule_area_keepout_shapes(zones, via_radius_nm)
     keepout += _track_keepout_shapes(board, net_name, via_radius_nm, clearances)
-
     if avoid_other_zones:
         keepout += _zone_keepout_shapes(zones, net_name, via_radius_nm, clearances)
-
     if avoid_footprints:
         keepout += _footprint_keepout_shapes(board, net_name, via_radius_nm, clearances)
 
     blocked = _blocked_predicate(keepout)
-
     points = [
         (ox, oy)
         for (ox, oy) in ((x + x_offset_nm, y + y_offset_nm) for (x, y) in candidates)
