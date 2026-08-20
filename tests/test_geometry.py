@@ -92,6 +92,28 @@ def test_make_via():
     assert (via.position.x, via.position.y) == (1000, 2000)
 
 
+def test_make_via_does_not_share_the_cached_template():
+    # _make_via copies a per-parameter-set template instead of rebuilding the
+    # padstack every time. The failure mode that buys is every via in a run
+    # ending up at one position, or one mutation poisoning the cache for the
+    # rest of the session, so check two vias off the same template are separate
+    # objects and that the second one did not disturb the first.
+    args = (
+        ViaType.VT_THROUGH, BoardLayer.BL_F_Cu, BoardLayer.BL_B_Cu,
+        from_mm(0.6), from_mm(0.3),
+    )
+    a = _make_via(1000, 2000, *args, Net(name="GND"))
+    b = _make_via(9000, 8000, *args, Net(name="VCC"))
+    assert (a.position.x, a.position.y) == (1000, 2000)
+    assert (b.position.x, b.position.y) == (9000, 8000)
+    assert (a.net.name, b.net.name) == ("GND", "VCC")
+    # A third via still comes out of the template clean, not carrying b's fields.
+    c = _make_via(1000, 2000, *args, Net(name="GND"))
+    assert c.proto.SerializeToString(deterministic=True) == a.proto.SerializeToString(
+        deterministic=True
+    )
+
+
 def test_make_via_microvia_spans_given_layers():
     # Regression: only VT_THROUGH gets its drill span auto-filled by kipy's
     # own Via.type setter, so a microvia's start/end layers must be set from

@@ -16,6 +16,7 @@ import re
 import sys
 import traceback
 from collections import defaultdict
+from functools import lru_cache
 from pathlib import Path
 
 import wx
@@ -682,8 +683,20 @@ def _nudged(x, y, nudge_r, allowed, blocked):
     return None
 
 
-def _make_via(x, y, via_type, start_layer, end_layer, diameter_nm, drill_nm, net):
-    """Create a through Via with a valid single-layer PST_NORMAL padstack."""
+@lru_cache(maxsize=None)
+def _via_template(via_type, start_layer, end_layer, diameter_nm, drill_nm):
+    """The shared part of a stitching via, built once per parameter set.
+
+    Every assignment to PadStack.type costs a full iter_copper_layers() sweep,
+    because kipy builds its required-layers dict eagerly and the PST_CUSTOM entry
+    lists all 32 copper layers via is_copper_layer, which rebuilds a 32-element
+    set of protobuf enum lookups per layer. Via() does one such assignment and the
+    diameter setter another, so a 2401-via run paid it 4802 times: 14.8 million
+    protobuf attribute lookups, 95% of the whole stitch run. Paying it once and
+    CopyFrom-ing the finished proto per via is ~300x cheaper for the same bytes.
+
+    Returns the raw proto. Callers must copy it, never mutate it.
+    """
     via = Via()  # defaults to VT_THROUGH with a PST_NORMAL, F_Cu-only padstack
     via.type = via_type
     via.padstack.drill.start_layer = start_layer
@@ -691,6 +704,12 @@ def _make_via(x, y, via_type, start_layer, end_layer, diameter_nm, drill_nm, net
     via.diameter = diameter_nm
     via.drill_diameter = drill_nm
     via.padstack.copper_layers[0].shape = PSS_CIRCLE
+    return via.proto
+
+
+def _make_via(x, y, via_type, start_layer, end_layer, diameter_nm, drill_nm, net):
+    """Create a through Via with a valid single-layer PST_NORMAL padstack."""
+    via = Via(proto=_via_template(via_type, start_layer, end_layer, diameter_nm, drill_nm))
     via.position = Vector2.from_xy(int(x), int(y))
     via.net = net
     return via
