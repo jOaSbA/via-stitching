@@ -70,9 +70,9 @@
       "kicad_version": "10.0",
       "runtime": "ipc",
       "download_url": "https://github.com/jOaSbA/via-stitching/releases/download/v2.0.0/via-stitching-2.0.0.zip",
-      "download_sha256": "2d9dcd6060489067e168ebc05c8a7c6820397cd445df80a0a524039f0667dd44",
-      "download_size": 34096,
-      "install_size": 73968
+      "download_sha256": "12910d1dc0c41562c2c92ea3a7e441d1d60d99a199c5f0cf9f9e0cb5858a80b4",
+      "download_size": 37845,
+      "install_size": 85850
     }
   ]
 }
