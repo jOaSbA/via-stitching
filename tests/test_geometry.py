@@ -24,13 +24,23 @@ from via_stitching_action import (  # noqa: E402
     _keepout_shapes,
     _make_via,
     _net_clearances,
+    _nudge_radius,
+    _nudged,
+    _pad_copper_keepout_shapes,
     _rule_area_keepout_shapes,
     _track_keepout_shapes,
     _zone_keepout_shapes,
+    stitch,
 )
 
 MM = from_mm(1.0)
 BOX = (0, 0, 10 * MM, 10 * MM)
+
+
+def SimpleNamespaceXY(x, y):
+    from types import SimpleNamespace
+
+    return SimpleNamespace(x=x, y=y)
 
 
 def test_square_grid():
@@ -80,6 +90,28 @@ def test_make_via():
     assert via.padstack.drill.start_layer == BoardLayer.BL_F_Cu
     assert via.padstack.drill.end_layer == BoardLayer.BL_B_Cu
     assert (via.position.x, via.position.y) == (1000, 2000)
+
+
+def test_make_via_does_not_share_the_cached_template():
+    # _make_via copies a per-parameter-set template instead of rebuilding the
+    # padstack every time. The failure mode that buys is every via in a run
+    # ending up at one position, or one mutation poisoning the cache for the
+    # rest of the session, so check two vias off the same template are separate
+    # objects and that the second one did not disturb the first.
+    args = (
+        ViaType.VT_THROUGH, BoardLayer.BL_F_Cu, BoardLayer.BL_B_Cu,
+        from_mm(0.6), from_mm(0.3),
+    )
+    a = _make_via(1000, 2000, *args, Net(name="GND"))
+    b = _make_via(9000, 8000, *args, Net(name="VCC"))
+    assert (a.position.x, a.position.y) == (1000, 2000)
+    assert (b.position.x, b.position.y) == (9000, 8000)
+    assert (a.net.name, b.net.name) == ("GND", "VCC")
+    # A third via still comes out of the template clean, not carrying b's fields.
+    c = _make_via(1000, 2000, *args, Net(name="GND"))
+    assert c.proto.SerializeToString(deterministic=True) == a.proto.SerializeToString(
+        deterministic=True
+    )
 
 
 def test_make_via_microvia_spans_given_layers():
@@ -146,13 +178,19 @@ def test_keepout_shapes_use_drill_not_copper():
     _, _, maxx2, _ = shapes2[0].bounds
     assert abs(maxx2 - expected_r) < from_mm(0.01), (maxx2, expected_r)
 
-    # A milled slot is a drill too. Sizing the keepout off the short axis would
-    # leave a via sitting on the far end of the slot.
+    # A milled slot is a drill too, and gets a capsule along its long axis: tight
+    # across the slot, still covering the far end. Sizing it off the short axis
+    # would leave a via sitting on the end of the slot; a circle as wide as the
+    # slot is long (what this used to do) blocked a far larger disc than the hole.
     slot_pad = pth_pad(from_mm(0.3), from_mm(3.0))
     board_slot = SimpleNamespace(get_vias=lambda: [], get_pads=lambda: [slot_pad])
-    _, _, maxx3, _ = _keepout_shapes(board_slot, from_mm(0.15), full_span)[0].bounds
-    slot_r = from_mm(0.15) + from_mm(1.5) + from_mm(0.25)
-    assert abs(maxx3 - slot_r) < from_mm(0.01), (maxx3, slot_r)
+    _, _, maxx3, maxy3 = _keepout_shapes(
+        board_slot, from_mm(0.15), full_span
+    )[0].bounds
+    across = from_mm(0.15) + from_mm(0.15) + from_mm(0.25)  # via + short axis + margin
+    along = from_mm(1.5) - from_mm(0.15) + across  # plus half the slot's travel
+    assert abs(maxx3 - across) < from_mm(0.01), (maxx3, across)
+    assert abs(maxy3 - along) < from_mm(0.01), (maxy3, along)
 
     # Regression: a via whose span doesn't overlap the new via's span must not
     # count as a keepout (e.g. a front microvia stack when placing a back one).
@@ -529,6 +567,281 @@ def test_dialogs_build():
             field.SetValue(good)
     finally:
         dlg.Destroy()
+
+
+def _fake_board(pads=(), vias=(), tracks=(), size_mm=20.0, nets=("GND", "SIG")):
+    """Enough of a board for stitch() to run end to end, offline.
+
+    Two copper layers with the whole square poured on `nets[0]`, and whatever
+    pads/vias/tracks the caller wants in the way. create_items echoes back what
+    it was handed, which is what the real API does.
+    """
+    from types import SimpleNamespace
+
+    def node(x, y):
+        return SimpleNamespace(
+            has_point=True, has_arc=False, point=SimpleNamespace(x=x, y=y)
+        )
+
+    side = from_mm(size_mm)
+    outline = SimpleNamespace(
+        nodes=[node(0, 0), node(side, 0), node(side, side), node(0, side)]
+    )
+    pour = [SimpleNamespace(outline=outline, holes=[])]
+    zone = SimpleNamespace(
+        net=SimpleNamespace(name=nets[0]),
+        is_rule_area=lambda: False,
+        filled_polygons={BoardLayer.BL_F_Cu: pour, BoardLayer.BL_B_Cu: pour},
+    )
+
+    created = []
+
+    def create_items(items):
+        made = items if isinstance(items, list) else [items]
+        created.extend(made)
+        return made
+
+    return SimpleNamespace(
+        get_nets=lambda: [Net(name=n) for n in nets],
+        get_zones=lambda: [zone],
+        get_enabled_layers=lambda: [BoardLayer.BL_F_Cu, BoardLayer.BL_B_Cu],
+        get_layer_name=lambda l: {BoardLayer.BL_F_Cu: "F.Cu",
+                                  BoardLayer.BL_B_Cu: "B.Cu"}[l],
+        get_netclass_for_nets=lambda n: {},
+        get_vias=lambda: list(vias),
+        get_pads=lambda: list(pads),
+        get_tracks=lambda: list(tracks),
+        create_items=create_items,
+        get_items_by_id=lambda ids: list(ids),
+        refill_zones=lambda block=True: None,
+        placed=created,
+    )
+
+
+def test_stitch_places_a_clean_grid():
+    # The only test that drives the whole pipeline. Nothing below asserts a
+    # placement *quality*; they assert the invariants that a via array has to
+    # satisfy to be manufacturable, and they are what catches a helper whose
+    # signature or return type drifted out of step with its caller.
+    from itertools import combinations
+
+    from via_stitching_action import HOLE_MARGIN_MM
+
+    drill_mm, dia_mm, spacing_mm = 0.3, 0.6, 2.0
+    pad = _smd_pad("SIG", from_mm(2.0), from_mm(2.0))
+    pad.position = SimpleNamespaceXY(from_mm(10.0), from_mm(10.0))
+    board = _fake_board(pads=[pad])
+
+    count, _grouped = stitch(
+        board, ViaType.VT_THROUGH, BoardLayer.BL_F_Cu, BoardLayer.BL_B_Cu, "GND",
+        dia_mm, drill_mm, spacing_mm, "Square", 0.0, 0.0,
+    )
+    assert count > 50, count
+
+    points = [(v.position.x, v.position.y) for v in board.placed if hasattr(v, "position")]
+    assert len(points) == count
+    assert len(set(points)) == count, "duplicate via positions"
+
+    # Every via has to stay inside the pour, inset by its own radius.
+    for x, y in points:
+        assert from_mm(0.3) <= x <= from_mm(19.7), (x, y)
+        assert from_mm(0.3) <= y <= from_mm(19.7), (x, y)
+
+    # Nothing may land on the SIG pad's copper plus its clearance.
+    reach = from_mm(1.0) + from_mm(0.3) + from_mm(FALLBACK_CLEARANCE_MM)
+    for x, y in points:
+        assert max(abs(x - from_mm(10.0)), abs(y - from_mm(10.0))) >= reach - 1, (x, y)
+
+    # And no two of them may crowd each other's holes, nudged or not. The bound
+    # itself is covered by test_nudge_radius_keeps_hole_margin_between_neighbours;
+    # this is the cheap end-to-end version of the same invariant, over the vias a
+    # real run actually produced rather than over nominal grid positions.
+    floor = from_mm(drill_mm) + from_mm(HOLE_MARGIN_MM)
+    close = [
+        (a, b) for a, b in combinations(points, 2)
+        if math.hypot(a[0] - b[0], a[1] - b[1]) < floor
+    ]
+    assert not close, close[:3]
+
+
+def test_stitch_offset_does_not_lose_an_edge():
+    # Regression: applying the X/Y offset to the generated points instead of to
+    # the grid bounds tests each candidate before it moves, which can only drop
+    # positions and never add the ones that become valid once shifted. It cost a
+    # whole row and column of the grid. Offsetting by half the spacing lands the
+    # grid strictly inside the inset pour, so it must not place *fewer* vias.
+    plain, _ = stitch(
+        _fake_board(), ViaType.VT_THROUGH, BoardLayer.BL_F_Cu, BoardLayer.BL_B_Cu,
+        "GND", 0.6, 0.3, 2.0, "Square", 0.0, 0.0,
+    )
+    shifted, _ = stitch(
+        _fake_board(), ViaType.VT_THROUGH, BoardLayer.BL_F_Cu, BoardLayer.BL_B_Cu,
+        "GND", 0.6, 0.3, 2.0, "Square", 1.0, 1.0,
+    )
+    assert shifted > plain, (plain, shifted)
+
+
+def _smd_pad(net, size_x, size_y, angle_deg=0.0):
+    """An SMD pad on F.Cu, shaped like the kipy objects the keepouts read."""
+    from types import SimpleNamespace
+
+    from kipy.board_types import PadType
+
+    return SimpleNamespace(
+        pad_type=PadType.PT_SMD,
+        net=SimpleNamespace(name=net),
+        position=SimpleNamespace(x=0, y=0),
+        padstack=SimpleNamespace(
+            layers=[BoardLayer.BL_F_Cu],
+            angle=SimpleNamespace(degrees=angle_deg),
+            copper_layers=[
+                SimpleNamespace(
+                    layer=BoardLayer.BL_F_Cu,
+                    size=SimpleNamespace(x=size_x, y=size_y),
+                )
+            ],
+        ),
+    )
+
+
+def test_pad_copper_keepout_respects_same_net_toggle():
+    # The thermal-via case: with same-net pads off, a GND pad must produce no
+    # keepout at all, or a via array under a QFN ground pad places nothing. Pads
+    # on other nets are avoided either way.
+    from types import SimpleNamespace
+
+    span = [BoardLayer.BL_F_Cu, BoardLayer.BL_B_Cu]
+    gnd = _smd_pad("GND", from_mm(3.0), from_mm(3.0))
+    sig = _smd_pad("SIG", from_mm(1.0), from_mm(1.0))
+    board = SimpleNamespace(get_pads=lambda: [gnd, sig])
+    clearances = _fallback_clearances()
+
+    off = _pad_copper_keepout_shapes(
+        board, "GND", from_mm(0.3), clearances, span, avoid_same_net_pads=False
+    )
+    assert len(off) == 1, off  # SIG only
+
+    on = _pad_copper_keepout_shapes(
+        board, "GND", from_mm(0.3), clearances, span, avoid_same_net_pads=True
+    )
+    assert len(on) == 2, on
+
+    # A same-net pad takes the via radius and no clearance on top, so stitching
+    # can hug it without the ring landing on the pad copper.
+    _, _, maxx, _ = on[0].bounds
+    assert abs(maxx - (from_mm(1.5) + from_mm(0.3))) < from_mm(0.01), maxx
+
+    # An SMD pad on a layer outside the span is not in the via's way at all.
+    inner = [BoardLayer.BL_In1_Cu, BoardLayer.BL_In2_Cu]
+    assert _pad_copper_keepout_shapes(
+        board, "GND", from_mm(0.3), clearances, inner, avoid_same_net_pads=True
+    ) == []
+
+
+def test_slot_and_pad_copper_rotate_the_same_way():
+    # Regression: the slot capsule in _keepout_shapes and the copper rect in
+    # _pad_copper_keepout_shapes describe the same physical pad, so they have to
+    # rotate in the same direction. They used to use opposite signs, which
+    # mirrored the drill keepout for every pad that was not axis aligned.
+    from types import SimpleNamespace
+
+    from kipy.board_types import PadType
+
+    def y_at_max_x(shape):
+        return max(shape.exterior.coords, key=lambda c: c[0])[1]
+
+    span = [BoardLayer.BL_F_Cu, BoardLayer.BL_B_Cu]
+    angle = 30.0
+
+    slot = SimpleNamespace(
+        pad_type=PadType.PT_PTH,
+        position=SimpleNamespace(x=0, y=0),
+        padstack=SimpleNamespace(
+            angle=SimpleNamespace(degrees=angle),
+            drill=SimpleNamespace(
+                diameter=SimpleNamespace(x=from_mm(3.0), y=from_mm(0.3))
+            ),
+        ),
+    )
+    board_slot = SimpleNamespace(get_vias=lambda: [], get_pads=lambda: [slot])
+    capsule = _keepout_shapes(board_slot, from_mm(0.15), span)[0]
+
+    rect_pad = _smd_pad("SIG", from_mm(3.0), from_mm(1.0), angle_deg=angle)
+    board_rect = SimpleNamespace(get_pads=lambda: [rect_pad])
+    rect = _pad_copper_keepout_shapes(
+        board_rect, "GND", from_mm(0.15), _fallback_clearances(), span
+    )[0]
+
+    # KiCad angles are counter-clockwise on screen with the board y axis pointing
+    # down, so a +30 degree pad leans toward negative y at its far end. Both
+    # keepouts have to agree on that.
+    assert y_at_max_x(capsule) < 0, y_at_max_x(capsule)
+    assert y_at_max_x(rect) < 0, y_at_max_x(rect)
+
+    # And the long axis has to survive the rotation: a 3 mm slot rotated 30
+    # degrees still reaches about 1.35 mm * cos(30) out in x.
+    minx, miny, maxx, maxy = capsule.bounds
+    assert maxx > from_mm(1.0), maxx
+    assert maxy < maxx, (maxy, maxx)
+
+
+def test_nudge_radius_keeps_hole_margin_between_neighbours():
+    # Two neighbours nudged toward each other end up (spacing - 2r) apart, so r
+    # has to leave HOLE_MARGIN_MM between their drills. Nearest-neighbour
+    # distance is `spacing` in all three patterns. The old spacing/3 broke this
+    # at the microvia defaults (0.333 mm apart, 0.233 mm of hole gap).
+    from via_stitching_action import HOLE_MARGIN_MM
+
+    for spacing_mm, drill_mm in ((2.0, 0.3), (1.0, 0.1), (0.8, 0.3)):
+        spacing, drill = from_mm(spacing_mm), from_mm(drill_mm)
+        r = _nudge_radius(spacing, drill)
+        assert 0 < r <= spacing // 4, (spacing_mm, r)  # grid still reads as a grid
+        gap = (spacing - 2 * r) - drill
+        assert gap >= from_mm(HOLE_MARGIN_MM), (spacing_mm, drill_mm, gap)
+
+    # A grid with no slack left nudges nothing rather than crowding the holes.
+    assert _nudge_radius(from_mm(0.5), from_mm(0.3)) == 0
+
+
+def test_nudged_finds_a_spot_beside_a_keepout():
+    # The point of the whole thing: a candidate landing in a pad's clearance area
+    # should come out beside the pad instead of leaving a hole in the grid.
+    from shapely.geometry import Point, box
+    from shapely.prepared import prep
+
+    spacing, drill = from_mm(2.0), from_mm(0.3)
+    nudge_r = _nudge_radius(spacing, drill)
+    region = box(0, 0, 10 * MM, 10 * MM)
+    prepared = prep(region)
+
+    def allowed(pt):
+        return prepared.contains(pt)
+
+    here = (5 * MM, 5 * MM)
+    small = _blocked_predicate([Point(*here).buffer(from_mm(0.3))])
+    moved = _nudged(here[0], here[1], nudge_r, allowed, small)
+    assert moved is not None
+    assert not small(*moved)
+    assert allowed(Point(*moved))
+    assert math.hypot(moved[0] - here[0], moved[1] - here[1]) <= nudge_r + 1
+
+    # A keepout that swallows the whole ring drops the candidate rather than
+    # walking it across the board.
+    big = _blocked_predicate([Point(*here).buffer(from_mm(2.0))])
+    assert _nudged(here[0], here[1], nudge_r, allowed, big) is None
+
+    # Near the edge of the pour, whatever it settles on is still inside it.
+    edge = _blocked_predicate([Point(0, 0).buffer(from_mm(0.3))])
+    at_edge = _nudged(0, 0, nudge_r, allowed, edge)
+    assert at_edge is None or allowed(Point(*at_edge)), at_edge
+
+    # A pour with no room for the ring drops the candidate instead of putting a
+    # via outside the copper.
+    tiny = prep(box(0, 0, from_mm(0.1), from_mm(0.1)))
+    assert _nudged(0, 0, nudge_r, lambda pt: tiny.contains(pt), edge) is None
+
+    # No slack in the grid: nothing moves.
+    assert _nudged(here[0], here[1], 0, allowed, small) is None
 
 
 if __name__ == "__main__":

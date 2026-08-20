@@ -16,6 +16,7 @@ import re
 import sys
 import traceback
 from collections import defaultdict
+from functools import lru_cache
 from pathlib import Path
 
 import wx
@@ -46,24 +47,36 @@ VERSION = "2.0.0"
 # real board. Every miss surfaces as a lost connection mid-edit.
 API_TIMEOUT_MS = 30000
 
+DEFAULT_NET = "GND"
 
-# --- Dialog defaults --------------------------------------------------------
+# Default via settings
 DEFAULT_VIA_DIAMETER_MM = 0.6
 DEFAULT_DRILL_MM = 0.3
 DEFAULT_SPACING_MM = 2.0
-DEFAULT_NET = "GND"
+
+# Default microvia settings
+DEFAULT_MICROVIA_DIAMETER_MM = 0.25
+DEFAULT_MICROVIA_DRILL_MM = 0.1
+DEFAULT_MICROVIA_SPACING_MM = DEFAULT_MICROVIA_DIAMETER_MM * 4
+
 PATTERNS = ["Hexagonal", "Square", "Staggered"]
 DEFAULT_PATTERN = "Square"
+
 # Off by default: a via through another net's zone is not a DRC error. KiCad pulls
 # the fill back around it on the refill this plugin already triggers. And on the
 # common 4-layer stackup an inner power plane covers most of the board, so on by
 # default would place no vias at all where it otherwise places a full grid.
 # Tracks are the opposite case, so that keepout is unconditional.
 DEFAULT_AVOID_OTHER_ZONES = False
+
 # Off by default: thermal-via arrays under a QFN/BGA ground pad are a common,
 # intentional use of via stitching, so this must not block them by default.
 DEFAULT_AVOID_FOOTPRINTS = False
 
+# Off by default, same reasoning: dropping a via array straight onto a QFN/BGA
+# thermal pad is a normal use of stitching. Pads on *other* nets are always
+# avoided, that keepout is not optional.
+DEFAULT_AVOID_SAME_NET_PADS = False
 
 # Safety margins applied silently (the dialog has no clearance field, by design).
 # The inset keeps a via at least (via_radius + EDGE_EPS) inside the fill on every
@@ -72,8 +85,10 @@ DEFAULT_AVOID_FOOTPRINTS = False
 # through via's drill crosses those too, which is what the track and zone keepouts
 # below are for. EDGE_EPS just absorbs polygon rounding.
 EDGE_EPS_MM = 0.05
+
 # Hole-to-hole margin kept between a new via drill and existing via/pad drills.
 HOLE_MARGIN_MM = 0.25
+
 # Copper-to-copper clearance used when KiCad's netclass carries no value of its
 # own, which is what a netclass inheriting the board minimum reports over IPC.
 FALLBACK_CLEARANCE_MM = 0.2
@@ -338,42 +353,64 @@ def _blocked_predicate(shapes):
 
 def _keepout_shapes(board, via_radius_nm, span):
     """Drill keepouts around existing vias and through-hole pads.
-    Prevents new stitching vias from violating hole-to-hole clearance.
-    """
-    from shapely.geometry import Point
 
+    Prevents new stitching vias from violating hole-to-hole clearance.
+    Only vias whose layer span overlaps the new via's span can collide.
+    Round holes get circles; milled slots get a capsule along their long
+    axis instead of a circle as wide as the slot is long, which blocked a
+    far larger disc than the hole itself.
+    """
+    from shapely.geometry import Point, LineString
     margin = from_mm(HOLE_MARGIN_MM)
     span_set = set(span)
-    circles = []
-
+    shapes = []
     for via in board.get_vias():
-
         try:
             via_span = set(_span_layers(board, via.padstack.drill.start_layer, via.padstack.drill.end_layer))
         except ValueError:
             via_span = span_set  # unknown span: be conservative, treat as blocking
         if not (via_span & span_set):
             continue
-
         r = via_radius_nm + via.drill_diameter // 2 + margin
-        circles.append(Point(via.position.x, via.position.y).buffer(r, quad_segs=8))
-
+        shapes.append(Point(via.position.x, via.position.y).buffer(r, quad_segs=8))
     for pad in board.get_pads():
         if pad.pad_type not in (PadType.PT_PTH, PadType.PT_NPTH):
             continue
         try:
-            # A drill is a Vector2 because it may be a milled slot, so the long
-            # axis is what a round keepout has to cover.
+            # A drill is a Vector2 because it may be a milled slot.
             drill = pad.padstack.drill.diameter
-            hole_r = max(drill.x, drill.y) // 2
+            long_r = max(drill.x, drill.y) // 2
+            short_r = min(drill.x, drill.y) // 2
         except Exception:
-            hole_r = 0
-        if hole_r <= 0:
+            long_r = 0
+        if long_r <= 0:
             continue
-        r = via_radius_nm + hole_r + margin
-        circles.append(Point(pad.position.x, pad.position.y).buffer(r, quad_segs=8))
-
-    return circles
+        if long_r == short_r:
+            r = via_radius_nm + long_r + margin
+            shapes.append(Point(pad.position.x, pad.position.y).buffer(r, quad_segs=8))
+        else:
+            # Slot: segment along the long axis, buffered to a capsule that
+            # follows the hole's true outline plus the margins.
+            # KiCad angles run counter-clockwise on screen while the board y
+            # axis points down, so a KiCad +angle is a negative rotation in raw
+            # coordinates. Same sign as the affinity.rotate call in
+            # _pad_copper_keepout_shapes: letting the two drift apart mirrors
+            # this keepout for every slot that is not axis aligned.
+            half = long_r - short_r
+            a = -math.radians(_pad_angle_degrees(pad))
+            if drill.y > drill.x:
+                # Long axis is vertical at zero rotation.
+                dx = round(-half * math.sin(a))
+                dy = round(half * math.cos(a))
+            else:
+                dx = round(half * math.cos(a))
+                dy = round(half * math.sin(a))
+            seg = LineString([
+                (pad.position.x - dx, pad.position.y - dy),
+                (pad.position.x + dx, pad.position.y + dy),
+            ])
+            shapes.append(seg.buffer(via_radius_nm + short_r + margin, quad_segs=8))
+    return shapes
 
 
 def _track_keepout_shapes(board, net_name, via_radius_nm, clearances, span):
@@ -501,6 +538,76 @@ def _footprint_keepout_shapes(board, net_name, via_radius_nm, clearances):
         for bbox in boxes
     ]
 
+
+def _pad_angle_degrees(pad):
+    """Pad rotation in degrees; 0 when it can't be determined.
+
+    kipy exposes the rotation on the padstack; the exact type has varied,
+    so both an Angle object and a plain number are accepted. Calibrated
+    visually: if rotated rectangular pads get vias hugging their short
+    sides and gaps along their long sides, the sign at the call site is
+    wrong for this KiCad version.
+    """
+    try:
+        a = pad.padstack.angle
+        return a.degrees if hasattr(a, "degrees") else float(a)
+    except Exception:
+        return 0.0
+
+
+def _pad_copper_keepout_shapes(board, net_name, via_radius_nm, clearances, span,
+                               avoid_same_net_pads=DEFAULT_AVOID_SAME_NET_PADS):
+    """Clearance areas around pad copper on the spanned layers.
+
+    The via ring may stand inside a fill void, so clearance to the pad that
+    caused the void is enforced here instead of by fill containment. Each
+    keepout follows the pad's rotated rectangle, not its enclosing circle,
+    which on large rectangular pads blocked wide crescents of good pour.
+
+    Through-hole pads block any span; SMD pads only block spans including a
+    layer they have copper on; a pad whose layers can't be determined is
+    treated as blocking. Same-net pads take no clearance, only the via
+    radius, so stitching hugs the pad without the ring sitting on the
+    copper -- and they are skipped entirely when `avoid_same_net_pads` is
+    off, for intentional via-in-pad such as thermal arrays.
+    """
+    from shapely.geometry import box as shapely_box
+    from shapely import affinity
+    span_set = set(span)
+    shapes = []
+    for pad in board.get_pads():
+        same_net = pad.net.name == net_name
+        if same_net and not avoid_same_net_pads:
+            continue
+        if pad.pad_type not in (PadType.PT_PTH, PadType.PT_NPTH):
+            try:
+                pad_layers = set(pad.padstack.layers)
+            except Exception:
+                pad_layers = set()
+            if pad_layers and not (pad_layers & span_set):
+                continue
+        # Size off a layer the via actually reaches. On a padstack with per-layer
+        # copper (PST_FRONT_INNER_BACK, PST_CUSTOM) index 0 is F.Cu, which is the
+        # wrong ring for a blind via between two inner layers.
+        try:
+            layers = pad.padstack.copper_layers
+            size = next((l for l in layers if l.layer in span_set), layers[0]).size
+        except Exception:
+            continue
+        if size.x <= 0 or size.y <= 0:
+            continue
+        margin = via_radius_nm + (0 if same_net else clearances[pad.net.name])
+        rect = shapely_box(
+            pad.position.x - size.x // 2, pad.position.y - size.y // 2,
+            pad.position.x + size.x // 2, pad.position.y + size.y // 2,
+        )
+        angle_deg = _pad_angle_degrees(pad)
+        if angle_deg:
+            rect = affinity.rotate(rect, -angle_deg, origin="center")
+        shapes.append(rect.buffer(margin, quad_segs=8))
+    return shapes
+
+
 def _grid_points(bounds, spacing_nm, pattern):
     """Yield candidate (x, y) nm points across `bounds` for the given pattern.
 
@@ -531,8 +638,65 @@ def _grid_points(bounds, spacing_nm, pattern):
         row += 1
 
 
-def _make_via(x, y, via_type, start_layer, end_layer, diameter_nm, drill_nm, net):
-    """Create a through Via with a valid single-layer PST_NORMAL padstack."""
+def _nudge_radius(spacing_nm, drill_nm):
+    """How far a blocked candidate may be moved off its grid position.
+
+    Bounded on purpose, twice over. The grid has to still read as a grid, and
+    two neighbours nudged toward each other must still clear each other's
+    holes: nearest-neighbour distance is `spacing` in all three patterns (that
+    is what the hexagonal row pitch of spacing*sqrt(3)/2 buys), so moving both
+    ends by r leaves them (spacing - 2r) apart. spacing/4 keeps that at half
+    the spacing, and the second term holds HOLE_MARGIN_MM between the two
+    drills even at spacings tight enough that a quarter would break it.
+
+    Zero means the grid has no slack to give and nothing gets nudged.
+    """
+    room = (spacing_nm - drill_nm - from_mm(HOLE_MARGIN_MM)) // 2
+    return max(0, min(spacing_nm // 4, room))
+
+
+def _nudged(x, y, nudge_r, allowed, blocked):
+    """First clear position on a ring of 8 at `nudge_r` around (x, y), or None.
+
+    One ring, not a spiral: a blocked candidate costs 8 extra tests instead of
+    the ~50 a three-ring search costs, and on a board with an inner power plane
+    most candidates are blocked. This runs after the dialog is dismissed, with
+    no progress feedback, so that factor is the difference between a pause and
+    an apparent hang. The ring sits at the full radius rather than working
+    outwards, because a point blocked in the middle of a pad's clearance area
+    is likeliest to escape it at the far edge.
+
+    `blocked` is tested before `allowed`: an STRtree point query is the cheaper
+    of the two to fail on, and near a keepout it is the one that fails.
+    """
+    if nudge_r <= 0:
+        return None
+
+    from shapely.geometry import Point
+
+    for k in range(8):
+        a = 2 * math.pi * k / 8
+        nx = x + round(nudge_r * math.cos(a))
+        ny = y + round(nudge_r * math.sin(a))
+        if not blocked(nx, ny) and allowed(Point(nx, ny)):
+            return (nx, ny)
+    return None
+
+
+@lru_cache(maxsize=None)
+def _via_template(via_type, start_layer, end_layer, diameter_nm, drill_nm):
+    """The shared part of a stitching via, built once per parameter set.
+
+    Every assignment to PadStack.type costs a full iter_copper_layers() sweep,
+    because kipy builds its required-layers dict eagerly and the PST_CUSTOM entry
+    lists all 32 copper layers via is_copper_layer, which rebuilds a 32-element
+    set of protobuf enum lookups per layer. Via() does one such assignment and the
+    diameter setter another, so a 2401-via run paid it 4802 times: 14.8 million
+    protobuf attribute lookups, 95% of the whole stitch run. Paying it once and
+    CopyFrom-ing the finished proto per via is ~300x cheaper for the same bytes.
+
+    Returns the raw proto. Callers must copy it, never mutate it.
+    """
     via = Via()  # defaults to VT_THROUGH with a PST_NORMAL, F_Cu-only padstack
     via.type = via_type
     via.padstack.drill.start_layer = start_layer
@@ -540,6 +704,12 @@ def _make_via(x, y, via_type, start_layer, end_layer, diameter_nm, drill_nm, net
     via.diameter = diameter_nm
     via.drill_diameter = drill_nm
     via.padstack.copper_layers[0].shape = PSS_CIRCLE
+    return via.proto
+
+
+def _make_via(x, y, via_type, start_layer, end_layer, diameter_nm, drill_nm, net):
+    """Create a through Via with a valid single-layer PST_NORMAL padstack."""
+    via = Via(proto=_via_template(via_type, start_layer, end_layer, diameter_nm, drill_nm))
     via.position = Vector2.from_xy(int(x), int(y))
     via.net = net
     return via
@@ -570,10 +740,10 @@ def _group_vias(board, vias, net_name, start_layer, end_layer):
 
 
 def stitch(
-    board, via_type, start_layer, end_layer, net_name, via_dia_mm, drill_mm, spacing_mm, pattern, 
-    x_offset_mm, y_offset_mm, 
-    avoid_other_zones=DEFAULT_AVOID_OTHER_ZONES, avoid_footprints=DEFAULT_AVOID_FOOTPRINTS, parent=None):
-
+    board, via_type, start_layer, end_layer, net_name, via_dia_mm, drill_mm, spacing_mm,
+    pattern, x_offset_mm, y_offset_mm,
+    avoid_other_zones=DEFAULT_AVOID_OTHER_ZONES, avoid_footprints=DEFAULT_AVOID_FOOTPRINTS,
+    avoid_same_net_pads=DEFAULT_AVOID_SAME_NET_PADS, parent=None):
     """Run the stitching. Returns (vias placed, whether they were grouped)."""
     from shapely.geometry import Point
     from shapely.prepared import prep
@@ -582,7 +752,6 @@ def stitch(
     drill_nm = from_mm(drill_mm)
     spacing_nm = from_mm(spacing_mm)
     via_radius_nm = diameter_nm // 2
-
     x_offset_nm = from_mm(x_offset_mm)
     y_offset_nm = from_mm(y_offset_mm)
 
@@ -650,10 +819,11 @@ def stitch(
         minx + x_offset_nm, miny + y_offset_nm, maxx + x_offset_nm, maxy + y_offset_nm,
     )
     prepared = prep(region)
+    allowed = lambda pt: prepared.contains(pt)
     candidates = [
         (x, y)
         for (x, y) in _grid_points(shifted_bounds, spacing_nm, pattern)
-        if prepared.contains(Point(x, y))
+        if allowed(Point(x, y))
     ]
     if not candidates:
         raise RuntimeError(
@@ -662,20 +832,31 @@ def stitch(
         )
 
     # Every keepout as one flat list of shapes, tested through a single spatial
-    # index. Avoid existing via/pad drill holes, other nets' tracks, and rule
-    # areas on layers this via actually spans, plus whatever else the dialog
-    # asked for.
+    # index. Avoid existing via/pad drill holes, other nets' pad copper and
+    # tracks, plus whatever else the dialog asked for.
     clearances = _net_clearances(board, nets, net_name)
     keepout = _keepout_shapes(board, via_radius_nm, span)
+    keepout += _pad_copper_keepout_shapes(board, net_name, via_radius_nm, clearances, span, avoid_same_net_pads)
     keepout += _rule_area_keepout_shapes(zones, via_radius_nm, span)
     keepout += _track_keepout_shapes(board, net_name, via_radius_nm, clearances, span)
     if avoid_other_zones:
         keepout += _zone_keepout_shapes(zones, net_name, via_radius_nm, clearances, span)
     if avoid_footprints:
         keepout += _footprint_keepout_shapes(board, net_name, via_radius_nm, clearances)
-
     blocked = _blocked_predicate(keepout)
-    points = [(x, y) for (x, y) in candidates if not blocked(x, y)]
+
+    # A candidate blocked by a keepout gets one bounded attempt at a spot beside
+    # it before being dropped, so the grid keeps a via next to a pad's clearance
+    # area instead of leaving a hole there. Clear candidates cost nothing extra.
+    nudge_r = _nudge_radius(spacing_nm, drill_nm)
+    points = []
+    for (x, y) in candidates:
+        if not blocked(x, y):
+            points.append((x, y))
+            continue
+        moved = _nudged(x, y, nudge_r, allowed, blocked)
+        if moved is not None:
+            points.append(moved)
 
     if not points:
         # Only name the optional keepouts that are actually switched on, so this
@@ -808,7 +989,7 @@ class ViaStitchingDialog(wx.Dialog):
             self.via_type.SetStringSelection(self.VIA_TYPE_NAMES.get(sample_via.type))
         else:
             self.via_type.SetSelection(0)
-        self.via_type.Bind(wx.EVT_CHOICE, lambda evt: self._refresh_layer_controls())
+        self.via_type.Bind(wx.EVT_CHOICE, lambda evt: self._on_via_type())
 
         def _layer_combo():
             combo = wx.adv.BitmapComboBox(self, style=wx.CB_READONLY)
@@ -843,6 +1024,15 @@ class ViaStitchingDialog(wx.Dialog):
         self.via_dia = wx.TextCtrl(self, value=via_dia_mm_str)
         self.drill = wx.TextCtrl(self, value=viar_drill_mm_str)
         self.spacing = wx.TextCtrl(self, value=spacing_mm_str)
+
+        # Values the dialog put in those three fields itself, which
+        # _apply_via_type_defaults is then allowed to swap out. Seeded empty when
+        # the fields came from a preselected via, so switching the via type never
+        # discards settings that were copied off a real via on the board.
+        self._auto_values = (
+            set() if sample_via
+            else {via_dia_mm_str, viar_drill_mm_str, spacing_mm_str}
+        )
 
         self.pattern = wx.Choice(self, choices=PATTERNS)
         self.pattern.SetSelection(PATTERNS.index(DEFAULT_PATTERN))
@@ -895,7 +1085,25 @@ class ViaStitchingDialog(wx.Dialog):
             "is a normal use of via stitching, and this would block it."
         )
 
+        self.avoid_same_net_pads = wx.CheckBox(
+            self, label="Avoid pads already on this net"
+        )
+        self.avoid_same_net_pads.SetValue(DEFAULT_AVOID_SAME_NET_PADS)
+        self.avoid_same_net_pads.SetToolTip(
+            "Keep vias off the copper of pads that are already on the net being "
+            "stitched.\n\n"
+            "Off by default: dropping a via array straight onto a QFN or BGA "
+            "thermal pad is a normal use of stitching, and this would block it.\n\n"
+            "Tick this to leave same-net pads alone, for example to keep vias out "
+            "of a paste-critical pad. Pads on every other net are avoided either "
+            "way, with their full clearance."
+        )
+
         self.main_sizer = wx.BoxSizer(wx.VERTICAL)
+
+        self._make_group(self.main_sizer, [
+            ("Net Name:", self.net)
+        ])
 
         self._make_group(self.main_sizer, [
             ("Via Type:", self.via_type),
@@ -911,11 +1119,8 @@ class ViaStitchingDialog(wx.Dialog):
             ("X-Offset (mm):", self.x_offset),
             ("Y-Offset (mm):", self.y_offset),
             ("Zones:", self.avoid_zones),
-            ("Footprints:", self.avoid_footprints)
-        ])
-
-        self._make_group(self.main_sizer, [
-            ("Net Name:", self.net)
+            ("Footprints:", self.avoid_footprints),
+            ("Same-net pads:", self.avoid_same_net_pads)
         ])
 
         # CreateButtonSizer, not a hand-built one: it orders OK/Cancel to match
@@ -969,6 +1174,37 @@ class ViaStitchingDialog(wx.Dialog):
             self._set_layer_combo_choices(
                 self.end_layer, names, self.end_layer.GetStringSelection()
             )
+
+    def _on_via_type(self):
+        """Via type changed: re-derive the layer controls, then the size defaults."""
+        self._refresh_layer_controls()
+        self._apply_via_type_defaults()
+
+    def _apply_via_type_defaults(self):
+        """Swap the via/microvia size defaults in, without discarding real input.
+
+        A microvia at the 0.6 mm through-via default is not manufacturable, so
+        picking Micro should move diameter, drill and spacing. It must not move
+        them over a value copied from a preselected via or typed by hand, so only
+        a field still holding a value this dialog put there is fair game. That is
+        also why this hangs off the via type alone: _refresh_layer_controls runs
+        from __init__ and on every Start Layer change too, and resetting the sizes
+        from there wiped both the preselected via's settings and the user's own.
+        """
+        if self.via_type.GetStringSelection() == "Micro":
+            wanted = (
+                DEFAULT_MICROVIA_DIAMETER_MM,
+                DEFAULT_MICROVIA_DRILL_MM,
+                DEFAULT_MICROVIA_SPACING_MM,
+            )
+        else:
+            wanted = (DEFAULT_VIA_DIAMETER_MM, DEFAULT_DRILL_MM, DEFAULT_SPACING_MM)
+
+        wanted = [str(v) for v in wanted]
+        for ctrl, value in zip((self.via_dia, self.drill, self.spacing), wanted):
+            if ctrl.GetValue() in self._auto_values:
+                ctrl.SetValue(value)
+        self._auto_values.update(wanted)
 
     def _make_group(self, parent_sizer, rows):
         """rows: list of (label, control) pairs."""
@@ -1036,6 +1272,7 @@ class ViaStitchingDialog(wx.Dialog):
             "y_offset_mm": y_offset_mm,
             "avoid_other_zones": self.avoid_zones.GetValue(),
             "avoid_footprints": self.avoid_footprints.GetValue(),
+            "avoid_same_net_pads": self.avoid_same_net_pads.GetValue(),
         }
 
 
