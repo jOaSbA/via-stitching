@@ -60,9 +60,13 @@ and restart the PCB editor.
      bodies, for mechanical fit rather than clearance. Leave it off if you want
      thermal-via arrays under a QFN or BGA ground pad, which is a normal use of
      via stitching.
+   - Avoid pads already on this net, off by default. See below.
 4. Click OK. Vias go only where the net is poured on both layers the via
    connects (and on any layer in between, where the net is also poured there),
-   inset far enough to stay DRC-clean, and the zones are refilled for you.
+   inset far enough to stay DRC-clean, and the zones are refilled for you. A
+   grid position blocked by a pad or a track is moved a short way to the
+   nearest clear spot rather than skipped, so the grid keeps its coverage
+   beside pads instead of leaving a hole there.
 
 ### Grouping
 
@@ -74,7 +78,7 @@ All placed vias go into one group named `ViaStitching <net>`:
 
 ## How clearance is handled
 
-There's no clearance field, on purpose. Five things keep the vias legal:
+There's no clearance field, on purpose. Six things keep the vias legal:
 
 - **The fill inset.** A via is placed only where it sits at least its own radius
   (plus a small epsilon) inside the fill on every layer the net is poured on.
@@ -86,14 +90,20 @@ There's no clearance field, on purpose. Five things keep the vias legal:
   unconditional: a via sitting on another net's track is a real DRC violation.
   A through via spans the whole board, so this still means every layer for it;
   a microvia or blind/buried via only checks the layers it actually connects.
+- **Other nets' pad copper.** The same reasoning as tracks, applied to pads.
+  The keepout follows the pad's rotated rectangle rather than a circle drawn
+  around it, so a large rectangular pad doesn't also block the good pour at its
+  corners. A through-hole pad blocks any span; an SMD pad only blocks a span
+  that includes a layer it actually has copper on.
 - **Rule areas.** A rule area that forbids vias is respected on every layer
   within the via's span, whichever layers it was drawn on. Same as above: a
   through via crosses the whole board, a microvia or blind/buried via only
   crosses the layers it spans.
 - **Existing holes.** Via and pad drills are avoided with a 0.25 mm
-  hole-to-hole margin. A milled slot is measured across its long axis. An
-  existing via only counts if its own layer span overlaps the new via's, so a
-  front-side microvia pass doesn't block positions a back-side pass needs.
+  hole-to-hole margin. A milled slot gets a capsule following its long axis,
+  rather than a circle as wide as the slot is long. An existing via only counts
+  if its own layer span overlaps the new via's, so a front-side microvia pass
+  doesn't block positions a back-side pass needs.
 - **Clearance values** come from the board's netclasses, taking the larger of the
   two nets involved the way KiCad's own rules do. A netclass that just inherits
   the board minimum reports no value over the IPC API, and those fall back to
@@ -104,6 +114,16 @@ another net's zone is not a DRC error: KiCad pulls the fill back around it durin
 the refill this plugin already triggers. Tick it if you'd rather not perforate an
 inner power plane at all. Expect far fewer vias, since on a typical 4-layer board
 that plane covers most of the board.
+
+The **Avoid pads already on this net** checkbox is off by default, so a via array
+can land straight on a QFN or BGA ground pad, which is a normal use of stitching.
+Tick it to keep vias off same-net pad copper as well. Pads on every other net are
+avoided either way, with their full clearance.
+
+Where a position is blocked, the via moves to the nearest clear spot within a
+quarter of the spacing rather than being dropped. That limit is capped again by
+the hole-to-hole margin, so two neighbours moved toward each other still clear
+each other's drills, and a grid with no room to spare is left exactly on pitch.
 
 If you see "No filled copper for net ...", fill the zones (`B`) and run again.
 
