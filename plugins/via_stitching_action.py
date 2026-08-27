@@ -108,6 +108,40 @@ def _kipy_version():
         return "unknown"
 
 
+def _settings_path():
+    """Where saved dialog settings live: alongside KiCad's own per-version config
+    so it's a location we already know is user-writable, falling back to the
+    home directory if KiCad's config dir can't be found."""
+    dirs = _kicad_config_dirs()
+    base = dirs[0] if dirs else os.path.expanduser("~")
+    return os.path.join(base, "via_stitching_settings.json")
+
+
+def _load_settings():
+    try:
+        with open(_settings_path(), encoding="utf-8") as fh:
+            return json.load(fh)
+    except Exception:
+        return {}
+
+
+def _save_settings(values):
+    try:
+        with open(_settings_path(), "w", encoding="utf-8") as fh:
+            json.dump(values, fh, indent=2)
+    except Exception:
+        pass  # best effort: a stale or unwritable settings file is not fatal
+
+
+def _clear_settings():
+    try:
+        os.remove(_settings_path())
+    except FileNotFoundError:
+        pass
+    except Exception:
+        pass
+
+
 def _kicad_config_dirs():
     """KiCad's per-version config directories, newest version first.
 
@@ -968,6 +1002,8 @@ class ViaStitchingDialog(wx.Dialog):
 
         self.VIA_TYPE_NAMES = {v: k for k, v in self.VIA_TYPE_CHOICES.items()}   # int -> name
 
+        self.board = board
+
         selected_vias = board.get_selection(KiCadObjectType.KOT_PCB_VIA)
         sample_via = None
         if selected_vias:
@@ -975,6 +1011,12 @@ class ViaStitchingDialog(wx.Dialog):
             sample_via_start_layer = sample_via.padstack.drill.start_layer
             sample_via_end_layer = sample_via.padstack.drill.end_layer
             sample_via_net_name = sample_via.net.name
+
+        # A preselected via's own settings always win. Otherwise fall back to
+        # whatever was saved from the last successful run, then the hardcoded
+        # defaults. Never touched when a via was preselected, so pasting a real
+        # via's settings is never second-guessed by a stale saved run.
+        saved = {} if sample_via else _load_settings()
 
         grid = wx.FlexGridSizer(cols=2, vgap=5, hgap=5)
         grid.AddGrowableCol(1)
@@ -987,6 +1029,8 @@ class ViaStitchingDialog(wx.Dialog):
         self.via_type = wx.Choice(self, choices=via_types)
         if sample_via:
             self.via_type.SetStringSelection(self.VIA_TYPE_NAMES.get(sample_via.type))
+        elif saved.get("via_type_name") in via_types:
+            self.via_type.SetStringSelection(saved["via_type_name"])
         else:
             self.via_type.SetSelection(0)
         self.via_type.Bind(wx.EVT_CHOICE, lambda evt: self._on_via_type())
@@ -1001,21 +1045,31 @@ class ViaStitchingDialog(wx.Dialog):
         self.start_layer = _layer_combo()
         if sample_via:
             self.start_layer.SetStringSelection(self.layer_names[sample_via_start_layer])
+        elif saved.get("start_layer_name") in copper_layer_names:
+            self.start_layer.SetStringSelection(saved["start_layer_name"])
         else:
             self.start_layer.SetSelection(0)
         self.end_layer = _layer_combo()
         if sample_via:
             self.end_layer.SetStringSelection(self.layer_names[sample_via_end_layer])
+        elif saved.get("end_layer_name") in copper_layer_names:
+            self.end_layer.SetStringSelection(saved["end_layer_name"])
         else:
             self.end_layer.SetSelection(len(copper_layer_names) - 1)
         # Micro's end layer is derived from which outer layer the start is, so
-        # changing the start has to re-derive it.
-        self.start_layer.Bind(wx.EVT_COMBOBOX, lambda evt: self._refresh_layer_controls())
+        # changing the start has to re-derive it. Either layer changing can also
+        # flip the advisory (e.g. picking a non-outer end layer for a Blind via).
+        self.start_layer.Bind(wx.EVT_COMBOBOX, lambda evt: self._on_start_layer())
+        self.end_layer.Bind(wx.EVT_COMBOBOX, lambda evt: self._update_advisory())
 
         if sample_via:
             via_dia_mm_str = str(to_mm(sample_via.diameter))
             viar_drill_mm_str = str(to_mm(sample_via.drill_diameter))
             spacing_mm_str = str(to_mm(sample_via.diameter * 4))
+        elif saved:
+            via_dia_mm_str = str(saved.get("via_dia_mm", DEFAULT_VIA_DIAMETER_MM))
+            viar_drill_mm_str = str(saved.get("drill_mm", DEFAULT_DRILL_MM))
+            spacing_mm_str = str(saved.get("spacing_mm", DEFAULT_SPACING_MM))
         else:
             via_dia_mm_str = str(DEFAULT_VIA_DIAMETER_MM)
             viar_drill_mm_str = str(DEFAULT_DRILL_MM)
@@ -1035,12 +1089,18 @@ class ViaStitchingDialog(wx.Dialog):
         )
 
         self.pattern = wx.Choice(self, choices=PATTERNS)
-        self.pattern.SetSelection(PATTERNS.index(DEFAULT_PATTERN))
+        if saved.get("pattern") in PATTERNS:
+            self.pattern.SetSelection(PATTERNS.index(saved["pattern"]))
+        else:
+            self.pattern.SetSelection(PATTERNS.index(DEFAULT_PATTERN))
 
         # if sample via layer starts in an odd layer then it starts with an offset
         if sample_via and sample_via_start_layer % 2 == 0:
             x_offset_mm_str = str(to_mm(sample_via.diameter * 2))
             y_offset_mm_str = str(to_mm(sample_via.diameter * 2))
+        elif not sample_via and saved:
+            x_offset_mm_str = str(saved.get("x_offset_mm", to_mm(0.0)))
+            y_offset_mm_str = str(saved.get("y_offset_mm", to_mm(0.0)))
         else:
             x_offset_mm_str = str(to_mm(0.0))
             y_offset_mm_str = str(to_mm(0.0))
@@ -1058,14 +1118,18 @@ class ViaStitchingDialog(wx.Dialog):
         self.net = wx.ComboBox(self, choices=names, style=wx.CB_DROPDOWN)
         if sample_via:
             self.net.SetValue(sample_via_net_name)
+        elif saved.get("net_name"):
+            self.net.SetValue(saved["net_name"])
         else:
             if DEFAULT_NET in names:
                 self.net.SetValue(DEFAULT_NET)
             elif names:
                 self.net.SetSelection(0)
 
+        # Not derived from a preselected via either way, so a saved run applies
+        # regardless of sample_via.
         self.avoid_zones = wx.CheckBox(self, label="Avoid zones of other nets")
-        self.avoid_zones.SetValue(DEFAULT_AVOID_OTHER_ZONES)
+        self.avoid_zones.SetValue(bool(saved.get("avoid_other_zones", DEFAULT_AVOID_OTHER_ZONES)))
         self.avoid_zones.SetToolTip(
             "Keep vias out of other nets' filled copper on every layer.\n\n"
             "Off by default: a via through another net's pour is not a DRC "
@@ -1076,7 +1140,7 @@ class ViaStitchingDialog(wx.Dialog):
         )
 
         self.avoid_footprints = wx.CheckBox(self, label="Avoid footprints")
-        self.avoid_footprints.SetValue(DEFAULT_AVOID_FOOTPRINTS)
+        self.avoid_footprints.SetValue(bool(saved.get("avoid_footprints", DEFAULT_AVOID_FOOTPRINTS)))
         self.avoid_footprints.SetToolTip(
             "Keep vias out from under every component's bounding box.\n\n"
             "This is about mechanical fit, not clearance, so it applies "
@@ -1088,7 +1152,7 @@ class ViaStitchingDialog(wx.Dialog):
         self.avoid_same_net_pads = wx.CheckBox(
             self, label="Avoid pads already on this net"
         )
-        self.avoid_same_net_pads.SetValue(DEFAULT_AVOID_SAME_NET_PADS)
+        self.avoid_same_net_pads.SetValue(bool(saved.get("avoid_same_net_pads", DEFAULT_AVOID_SAME_NET_PADS)))
         self.avoid_same_net_pads.SetToolTip(
             "Keep vias off the copper of pads that are already on the net being "
             "stitched.\n\n"
@@ -1113,6 +1177,14 @@ class ViaStitchingDialog(wx.Dialog):
             ("Drill (mm):", self.drill)
         ])
 
+        # Live, non-blocking indicator for _via_type_advisory. Never a dialog
+        # someone has to click through: it just reflects what the current via
+        # type/layer combination looks like, and updates as those change.
+        self.advisory_label = wx.StaticText(self, label="")
+        self.advisory_label.SetForegroundColour(wx.Colour(180, 95, 0))
+        self.advisory_label.Hide()
+        self.main_sizer.Add(self.advisory_label, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.TOP, 8)
+
         self._make_group(self.main_sizer, [
             ("Via Pattern:", self.pattern),
             ("Spacing (mm):", self.spacing),
@@ -1128,8 +1200,20 @@ class ViaStitchingDialog(wx.Dialog):
         # a fixed left-to-right order that only matches some platforms.
         buttons = self.CreateButtonSizer(wx.OK | wx.CANCEL)
 
+        self.reset_btn = wx.Button(self, label="Reset")
+        self.reset_btn.SetToolTip(
+            "Restore the built-in defaults and clear the settings saved from "
+            "previous runs."
+        )
+        self.reset_btn.Bind(wx.EVT_BUTTON, lambda evt: self._on_reset())
+
+        button_row = wx.BoxSizer(wx.HORIZONTAL)
+        button_row.Add(self.reset_btn, 0, wx.ALIGN_CENTER_VERTICAL)
+        button_row.AddStretchSpacer(1)
+        button_row.Add(buttons, 0, wx.EXPAND)
+
         self.main_sizer.AddSpacer(15)
-        self.main_sizer.Add(buttons, 0, wx.EXPAND)
+        self.main_sizer.Add(button_row, 0, wx.EXPAND)
 
         outer = wx.BoxSizer(wx.VERTICAL)
         outer.Add(self.main_sizer, 1, wx.EXPAND | wx.ALL, 8)
@@ -1138,6 +1222,7 @@ class ViaStitchingDialog(wx.Dialog):
         # Lock Start/End Layer to F.Cu/B.Cu if the initial via type (Through
         # by default, or the preselected via's type) is Through.
         self._refresh_layer_controls()
+        self._update_advisory()
 
     def _set_layer_combo_choices(self, combo, names, keep):
         """Repopulate a layer BitmapComboBox, keeping `keep` selected if still valid."""
@@ -1179,6 +1264,88 @@ class ViaStitchingDialog(wx.Dialog):
         """Via type changed: re-derive the layer controls, then the size defaults."""
         self._refresh_layer_controls()
         self._apply_via_type_defaults()
+        self._update_advisory()
+
+    def _on_start_layer(self):
+        """Start layer changed: re-derive the other layer control, then the advisory."""
+        self._refresh_layer_controls()
+        self._update_advisory()
+
+    def _update_advisory(self):
+        """Refresh the inline via-type advisory label from the current controls.
+
+        Reads the via type and layers directly off the controls rather than via
+        values(), which also validates the size/net fields and would raise
+        ValueError while those are mid-edit -- irrelevant to this advisory.
+        """
+        via_type = self.VIA_TYPE_CHOICES[self.via_type.GetStringSelection()]
+        start_layer = self.layer_map.get(self.start_layer.GetStringSelection())
+        end_layer = self.layer_map.get(self.end_layer.GetStringSelection())
+
+        advisory = None
+        if start_layer is not None and end_layer is not None and start_layer != end_layer:
+            advisory = _via_type_advisory(self.board, via_type, start_layer, end_layer)
+
+        if advisory:
+            self.advisory_label.SetLabel(advisory)
+            self.advisory_label.Wrap(380)
+            self.advisory_label.Show()
+        else:
+            self.advisory_label.SetLabel("")
+            self.advisory_label.Hide()
+        self.main_sizer.Layout()
+        self.Fit()
+
+    def _on_reset(self):
+        """Restore the hardcoded defaults and clear whatever was saved from a
+        previous run, undoing both persistence and any in-progress edits."""
+        _clear_settings()
+
+        self.via_type.SetSelection(0)  # "Through"
+        self._refresh_layer_controls()
+
+        self.via_dia.SetValue(str(DEFAULT_VIA_DIAMETER_MM))
+        self.drill.SetValue(str(DEFAULT_DRILL_MM))
+        self.spacing.SetValue(str(DEFAULT_SPACING_MM))
+        self._auto_values = {
+            str(DEFAULT_VIA_DIAMETER_MM), str(DEFAULT_DRILL_MM), str(DEFAULT_SPACING_MM)
+        }
+
+        self.pattern.SetSelection(PATTERNS.index(DEFAULT_PATTERN))
+        self.x_offset.SetValue(str(to_mm(0.0)))
+        self.y_offset.SetValue(str(to_mm(0.0)))
+
+        net_choices = [self.net.GetString(i) for i in range(self.net.GetCount())]
+        self.net.SetValue(DEFAULT_NET if DEFAULT_NET in net_choices else "")
+
+        self.avoid_zones.SetValue(DEFAULT_AVOID_OTHER_ZONES)
+        self.avoid_footprints.SetValue(DEFAULT_AVOID_FOOTPRINTS)
+        self.avoid_same_net_pads.SetValue(DEFAULT_AVOID_SAME_NET_PADS)
+
+        self._update_advisory()
+
+    def _settings_from_values(self, values):
+        """Convert a values() dict into the JSON-able form _save_settings expects.
+
+        Layers and via type are saved by name, not by the raw ids/ints in
+        values(), so a saved run still applies to a board whose layer table
+        happens to enumerate differently.
+        """
+        return {
+            "via_type_name": self.VIA_TYPE_NAMES.get(values["via_type"]),
+            "start_layer_name": self.layer_names.get(values["start_layer"]),
+            "end_layer_name": self.layer_names.get(values["end_layer"]),
+            "via_dia_mm": values["via_dia_mm"],
+            "drill_mm": values["drill_mm"],
+            "spacing_mm": values["spacing_mm"],
+            "pattern": values["pattern"],
+            "net_name": values["net_name"],
+            "x_offset_mm": values["x_offset_mm"],
+            "y_offset_mm": values["y_offset_mm"],
+            "avoid_other_zones": values["avoid_other_zones"],
+            "avoid_footprints": values["avoid_footprints"],
+            "avoid_same_net_pads": values["avoid_same_net_pads"],
+        }
 
     def _apply_via_type_defaults(self):
         """Swap the via/microvia size defaults in, without discarding real input.
@@ -1343,10 +1510,33 @@ def _is_busy(exc):
     return isinstance(exc, ApiError) and exc.code == ApiStatusCode.AS_BUSY
 
 
+def _is_token_mismatch(exc):
+    """True if we reached a different KiCad than the one that launched us.
+
+    KiCad serves the API on one socket per machine and the instance that starts
+    first keeps it. A second instance still hands its own KICAD_API_TOKEN to the
+    plugins it launches, so running this from the second one dials the socket,
+    reaches the first, and is turned away on the token. It looks exactly like
+    "no board open" from here, which is the wrong thing to go and fix, so it
+    gets told apart by KiCad's own status code rather than by guesswork.
+    """
+    return isinstance(exc, ApiError) and exc.code == ApiStatusCode.AS_TOKEN_MISMATCH
+
+
 BUSY_HELP = (
     "KiCad is busy and refused the request.\n\n"
     "It is most likely still refilling the zones from a previous run. Wait for "
     "the PCB editor to go idle, then run this again."
+)
+
+TOKEN_HELP = (
+    "Another KiCad instance owns the plugin API.\n\n"
+    "KiCad serves the API on a single socket, and whichever instance started "
+    "first holds it. This plugin was launched from a different one, so the "
+    "instance that answered refused the request as coming from elsewhere.\n\n"
+    "Close the other KiCad windows, then reopen the board you want to stitch "
+    "and run this again. A KiCad only claims the socket while it is starting "
+    "up, so the instance you keep has to be restarted, not just left open."
 )
 
 NO_BOARD_HELP = (
@@ -1451,9 +1641,16 @@ def main():
         )
         return
     except Exception as exc:
-        # The server answered, so it is running. Something else went wrong: KiCad
-        # still busy with our own parting zone refill, or no board open.
-        _report(None, BUSY_HELP if _is_busy(exc) else NO_BOARD_HELP, exc)
+        # The server answered, so it is running. What is left is which KiCad
+        # answered, and what state it was in: a second instance holding the
+        # socket, KiCad still busy with our own parting zone refill, or no board.
+        if _is_token_mismatch(exc):
+            help_text = TOKEN_HELP
+        elif _is_busy(exc):
+            help_text = BUSY_HELP
+        else:
+            help_text = NO_BOARD_HELP
+        _report(None, help_text, exc)
         return
 
     # The plugin runs as its own process. Give the dialog editor-attached window
@@ -1477,13 +1674,12 @@ def main():
             "Parameters: " + ", ".join(f"{k}={v}" for k, v in sorted(params.items()))
         )
 
-        advisory = _via_type_advisory(
-            board, params["via_type"], params["start_layer"], params["end_layer"]
-        )
-        if advisory:
-            style = wx.YES_NO | wx.ICON_WARNING | wx.STAY_ON_TOP
-            if wx.MessageBox(advisory + "\n\nContinue anyway?", "Via Stitching", style, dlg) != wx.YES:
-                return
+        # Save regardless of whether the stitch below succeeds: these are the
+        # dialog's own values at the moment OK was pressed, not a promise the
+        # stitch worked. The via-type/layer advisory is now shown live inside
+        # the dialog itself (see ViaStitchingDialog._update_advisory), so there
+        # is nothing left to confirm here.
+        _save_settings(dlg._settings_from_values(params))
 
         busy = wx.BusyCursor()
         try:

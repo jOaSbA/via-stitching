@@ -45,8 +45,8 @@ and restart the PCB editor.
      End Layer are free for every type except Through, which is always
      F.Cu/B.Cu. Picking a combination that isn't the standard shape for the
      chosen type (say a microvia that doesn't touch an outer layer) doesn't
-     block you, but shows a confirm-or-cancel prompt explaining why before
-     it places anything.
+     block you; a warning explaining why appears inline in the dialog, but
+     there's nothing to click through.
    - Via Diameter (mm) and Drill (mm) for the via size.
    - Via Pattern: Hexagonal (densest), Square, or Staggered, and Spacing (mm)
      for the centre-to-centre grid pitch.
@@ -67,6 +67,11 @@ and restart the PCB editor.
    grid position blocked by a pad or a track is moved a short way to the
    nearest clear spot rather than skipped, so the grid keeps its coverage
    beside pads instead of leaving a hole there.
+
+The dialog remembers what you last set (via type, layers, size, pattern,
+offsets, net, and the avoid-* checkboxes) and pre-fills the next run with it,
+unless a via was selected on the board first. **Reset** clears that and puts
+the built-in defaults back.
 
 ### Grouping
 

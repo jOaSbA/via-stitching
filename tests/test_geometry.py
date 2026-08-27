@@ -498,6 +498,34 @@ def test_connection_help():
     assert _api_enabled_in_config() in (True, False, None)
 
 
+def test_token_mismatch_is_told_apart_from_no_board():
+    # Two KiCad instances share one API socket, and only the first to start owns
+    # it. Running the plugin from the second one is refused on the token, which
+    # used to surface as "open a board in the PCB editor" and send people off to
+    # fix the wrong thing. KiCad has a status code for it, so use that.
+    from kipy.errors import ApiError
+    from kipy.proto.common import ApiStatusCode
+
+    from via_stitching_action import (
+        NO_BOARD_HELP, TOKEN_HELP, _is_busy, _is_token_mismatch,
+    )
+
+    mismatch = ApiError("token", code=ApiStatusCode.AS_TOKEN_MISMATCH)
+    assert _is_token_mismatch(mismatch)
+    assert not _is_busy(mismatch)
+
+    # and it must not swallow the other statuses
+    for code in (ApiStatusCode.AS_BUSY, ApiStatusCode.AS_UNHANDLED,
+                 ApiStatusCode.AS_BAD_REQUEST, ApiStatusCode.AS_NOT_READY):
+        assert not _is_token_mismatch(ApiError("other", code=code)), code
+    assert not _is_token_mismatch(ApiError("no code at all"))
+    assert not _is_token_mismatch(RuntimeError("not an ApiError"))
+
+    # the two messages must actually point somewhere different
+    assert TOKEN_HELP != NO_BOARD_HELP
+    assert "instance" in TOKEN_HELP
+
+
 def test_is_busy_recognises_kicads_busy_status():
     # Pinned against real kipy types: this is how the plugin tells "KiCad is
     # mid-operation" (usually our own parting refill) from "no board open".
@@ -567,6 +595,132 @@ def test_dialogs_build():
             field.SetValue(good)
     finally:
         dlg.Destroy()
+
+
+def test_advisory_is_inline_and_non_blocking():
+    # Issue #11: the via-type advisory used to be a YES/NO wx.MessageBox someone
+    # had to click through on nearly every run when stitching non-standard
+    # blind/buried spans. It must now be a plain label on the dialog itself,
+    # never something modal.
+    from types import SimpleNamespace
+
+    import wx
+
+    from via_stitching_action import ViaStitchingDialog
+
+    app = wx.App()  # noqa: F841
+
+    fake_layers = {
+        BoardLayer.BL_F_Cu: "F.Cu",
+        BoardLayer.BL_In1_Cu: "In1.Cu",
+        BoardLayer.BL_In2_Cu: "In2.Cu",
+        BoardLayer.BL_B_Cu: "B.Cu",
+    }
+    fake_board = SimpleNamespace(
+        get_enabled_layers=lambda: list(fake_layers.keys()),
+        get_layer_name=lambda layer: fake_layers[layer],
+        get_selection=lambda kind: [],
+    )
+
+    dlg = ViaStitchingDialog(None, ["GND"], fake_board)
+    try:
+        # Through, F.Cu -> B.Cu: the standard shape, no advisory shown.
+        assert not dlg.advisory_label.IsShown()
+
+        # Buried via touching an outer layer: not the standard shape. Go
+        # through _on_via_type, not a bare SetStringSelection, so the layer
+        # combos actually unlock from the Through-only F.Cu/B.Cu choices.
+        dlg.via_type.SetStringSelection("Buried")
+        dlg._on_via_type()
+        dlg.start_layer.SetStringSelection("F.Cu")
+        dlg.end_layer.SetStringSelection("In1.Cu")
+        dlg._update_advisory()
+        assert dlg.advisory_label.IsShown()
+        assert "buried" in dlg.advisory_label.GetLabel().lower()
+
+        # Switching back to a standard combination (buried between two inner
+        # layers) clears it again.
+        dlg.start_layer.SetStringSelection("In1.Cu")
+        dlg.end_layer.SetStringSelection("In2.Cu")
+        dlg._update_advisory()
+        assert not dlg.advisory_label.IsShown()
+    finally:
+        dlg.Destroy()
+
+
+def test_settings_persist_across_dialogs_and_reset_clears_them():
+    # Issue #11's second complaint: nothing about the dialog remembered a prior
+    # run, and there was no way to get back to the defaults. A saved run must
+    # pre-fill the next dialog, and Reset must both restore the hardcoded
+    # defaults and forget the saved run entirely.
+    import tempfile
+    from types import SimpleNamespace
+
+    import wx
+
+    import via_stitching_action as vsa
+
+    app = wx.App()  # noqa: F841
+
+    # Route settings at a throwaway path instead of the user's real KiCad
+    # config dir, so this test can't read or clobber a real saved run.
+    tmp_dir = tempfile.mkdtemp()
+    tmp_settings_path = os.path.join(tmp_dir, "settings.json")
+    original_settings_path = vsa._settings_path
+    vsa._settings_path = lambda: tmp_settings_path
+
+    fake_layers = {
+        BoardLayer.BL_F_Cu: "F.Cu",
+        BoardLayer.BL_In1_Cu: "In1.Cu",
+        BoardLayer.BL_In2_Cu: "In2.Cu",
+        BoardLayer.BL_B_Cu: "B.Cu",
+    }
+    fake_board = SimpleNamespace(
+        get_enabled_layers=lambda: list(fake_layers.keys()),
+        get_layer_name=lambda layer: fake_layers[layer],
+        get_selection=lambda kind: [],
+    )
+
+    try:
+        first = vsa.ViaStitchingDialog(None, ["GND", "VCC"], fake_board)
+        try:
+            first.via_dia.SetValue("0.8")
+            first.drill.SetValue("0.4")
+            first.spacing.SetValue("3.0")
+            first.net.SetValue("VCC")
+            first.avoid_footprints.SetValue(True)
+            vsa._save_settings(first._settings_from_values(first.values()))
+        finally:
+            first.Destroy()
+
+        second = vsa.ViaStitchingDialog(None, ["GND", "VCC"], fake_board)
+        try:
+            assert second.via_dia.GetValue() == "0.8"
+            assert second.drill.GetValue() == "0.4"
+            assert second.spacing.GetValue() == "3.0"
+            assert second.net.GetValue() == "VCC"
+            assert second.avoid_footprints.GetValue() is True
+
+            second._on_reset()
+            assert second.via_dia.GetValue() == str(vsa.DEFAULT_VIA_DIAMETER_MM)
+            assert second.drill.GetValue() == str(vsa.DEFAULT_DRILL_MM)
+            assert second.spacing.GetValue() == str(vsa.DEFAULT_SPACING_MM)
+            assert second.avoid_footprints.GetValue() is False
+            assert not os.path.exists(tmp_settings_path)
+        finally:
+            second.Destroy()
+
+        # And the settings file is really gone, not just re-defaulted in
+        # memory: a third dialog must not pick anything back up.
+        third = vsa.ViaStitchingDialog(None, ["GND", "VCC"], fake_board)
+        try:
+            assert third.via_dia.GetValue() == str(vsa.DEFAULT_VIA_DIAMETER_MM)
+        finally:
+            third.Destroy()
+    finally:
+        vsa._settings_path = original_settings_path
+        import shutil
+        shutil.rmtree(tmp_dir, ignore_errors=True)
 
 
 def _fake_board(pads=(), vias=(), tracks=(), size_mm=20.0, nets=("GND", "SIG")):
