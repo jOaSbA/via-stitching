@@ -33,10 +33,10 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Install Xvfb
+      - name: Install wxPython runtime dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y xvfb
+          sudo apt-get install -y xvfb libnotify4 libsdl2-2.0-0 libsm6
 
       - name: Install plugin dependencies
         run: |
