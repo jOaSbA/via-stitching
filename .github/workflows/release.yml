@@ -1,0 +1,67 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out tagged revision
+        uses: actions/checkout@v4
+
+      - name: Validate tag against metadata.json
+        id: version
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#v}"
+          metadata_version="$(jq -r '.versions[-1].version' metadata.json)"
+          if [[ "${version}" != "${metadata_version}" ]]; then
+            echo "Tag ${GITHUB_REF_NAME} does not match metadata.json's latest version ${metadata_version}." >&2
+            exit 1
+          fi
+          echo "version=${version}" >> "${GITHUB_OUTPUT}"
+          echo "archive=via-stitching-${version}.zip" >> "${GITHUB_OUTPUT}"
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+
+      - name: Install Xvfb
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y xvfb
+
+      - name: Install plugin dependencies
+        run: |
+          pip install -r plugins/requirements.txt \
+            -f https://extras.wxpython.org/wxPython4/extras/linux/gtk3/ubuntu-24.04/
+
+      - name: Run tests
+        run: xvfb-run -a python tests/test_geometry.py
+
+      - name: Build PCM package
+        run: python3 build.py
+
+      - name: Verify metadata.json is up to date
+        run: |
+          if ! git diff --exit-code metadata.json; then
+            echo "metadata.json is stale -- run 'python build.py' locally and commit the result before tagging." >&2
+            exit 1
+          fi
+
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${GITHUB_REF_NAME}" \
+            "dist/${{ steps.version.outputs.archive }}" \
+            --verify-tag \
+            --title "Via Stitching ${{ steps.version.outputs.version }}" \
+            --generate-notes

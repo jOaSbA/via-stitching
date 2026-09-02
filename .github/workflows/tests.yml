@@ -1,0 +1,31 @@
+name: Tests
+
+on:
+  push:
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+
+      - name: Install Xvfb
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y xvfb
+
+      - name: Install plugin dependencies
+        run: |
+          pip install -r plugins/requirements.txt \
+            -f https://extras.wxpython.org/wxPython4/extras/linux/gtk3/ubuntu-24.04/
+
+      - name: Run tests
+        run: xvfb-run -a python tests/test_geometry.py
