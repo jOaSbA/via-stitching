@@ -15,7 +15,7 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: "3.x"
+          python-version: "3.12"
 
       - name: Install Xvfb
         run: |
@@ -24,8 +24,9 @@ jobs:
 
       - name: Install plugin dependencies
         run: |
-          pip install -r plugins/requirements.txt \
+          pip install wxPython==4.2.2 \
             -f https://extras.wxpython.org/wxPython4/extras/linux/gtk3/ubuntu-24.04/
+          pip install -r plugins/requirements.txt
 
       - name: Run tests
         run: xvfb-run -a python tests/test_geometry.py
