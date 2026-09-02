@@ -36,6 +36,8 @@ from kipy.util.board_layer import iter_copper_layers
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from _mac_dialog import attach_to_stage_manager, prepare_app  # noqa: E402
 from _win_dialog import make_tool_window  # noqa: E402
+from _kicad_config import kicad_config_dirs  # noqa: E402
+from _i18n import _  # noqa: E402
 
 VERSION = "2.1.0"
 
@@ -112,7 +114,7 @@ def _settings_path():
     """Where saved dialog settings live: alongside KiCad's own per-version config
     so it's a location we already know is user-writable, falling back to the
     home directory if KiCad's config dir can't be found."""
-    dirs = _kicad_config_dirs()
+    dirs = kicad_config_dirs()
     base = dirs[0] if dirs else os.path.expanduser("~")
     return os.path.join(base, "via_stitching_settings.json")
 
@@ -142,38 +144,6 @@ def _clear_settings():
         pass
 
 
-def _kicad_config_dirs():
-    """KiCad's per-version config directories, newest version first.
-
-    KiCad keeps per-version settings (kicad_common.json, pcbnew.json,
-    colors/) under one directory per platform. Shared by
-    _api_enabled_in_config and _layer_colors so there's exactly one place
-    that knows where KiCad's config lives on each OS, instead of each caller
-    hardcoding its own (previously Linux-only) guess.
-    """
-    root = os.environ.get("KICAD_CONFIG_HOME")
-    if not root:
-        if sys.platform == "win32":
-            root = os.path.join(os.environ.get("APPDATA", ""), "kicad")
-        elif sys.platform == "darwin":
-            root = os.path.expanduser("~/Library/Preferences/kicad")
-        else:
-            root = os.path.join(
-                os.environ.get("XDG_CONFIG_HOME") or os.path.expanduser("~/.config"),
-                "kicad",
-            )
-    try:
-        # Version subdirectories, newest first, so KiCad 11 wins over 10.
-        versions = sorted(
-            (d for d in os.listdir(root) if os.path.isdir(os.path.join(root, d))),
-            key=lambda d: [int(p) for p in d.split(".") if p.isdigit()] or [0],
-            reverse=True,
-        )
-    except Exception:
-        return []
-    return [os.path.join(root, name) for name in versions]
-
-
 # KiCad default theme copper colors (fallback)
 _DEFAULT_COPPER = {
     "f": (200, 52, 52), "in1": (127, 200, 127), "in2": (206, 125, 66),
@@ -193,7 +163,7 @@ def _layer_colors():
     """{BoardLayer: (r, g, b)} from the active KiCad color theme, with fallbacks."""
     copper = dict(_DEFAULT_COPPER)
     try:
-        for config_dir in _kicad_config_dirs():
+        for config_dir in kicad_config_dirs():
             pcbnew_json = Path(config_dir) / "pcbnew.json"
             if not pcbnew_json.exists():
                 continue
@@ -294,20 +264,20 @@ def _via_type_advisory(board, via_type, start_layer, end_layer):
 
     if via_type == ViaType.VT_MICRO:
         if not (starts_outer or ends_outer) or len(_span_layers(board, start_layer, end_layer)) != 2:
-            return (
+            return _(
                 "This isn't a standard microvia: a microvia connects an "
                 "outer layer (F.Cu or B.Cu) to the layer right next to it. "
                 "KiCad's DRC will likely flag this via."
             )
     elif via_type == ViaType.VT_BLIND:
         if not (starts_outer or ends_outer):
-            return (
+            return _(
                 "This isn't a standard blind via: a blind via starts on an "
                 "outer layer (F.Cu or B.Cu)."
             )
     elif via_type == ViaType.VT_BURIED:
         if starts_outer or ends_outer:
-            return (
+            return _(
                 "This isn't a standard buried via: a buried via stays "
                 "between two inner layers, not F.Cu or B.Cu."
             )
@@ -793,14 +763,16 @@ def stitch(
     nets = board.get_nets()
     net = next((n for n in nets if n.name == net_name), None)
     if net is None:
-        raise RuntimeError(f"Net '{net_name}' not found on the board.")
+        raise RuntimeError(_("Net '{net}' not found on the board.").format(net=net_name))
 
     zones = board.get_zones()
     regions = _layer_region(zones, net_name)
     if not regions:
         raise RuntimeError(
-            f"No filled copper found for net '{net_name}'.\n"
-            "Fill the zones first (press B in the PCB editor), then run again."
+            _(
+                "No filled copper found for net '{net}'.\n"
+                "Fill the zones first (press B in the PCB editor), then run again."
+            ).format(net=net_name)
         )
 
     span = _span_layers(board, start_layer, end_layer)
@@ -810,9 +782,11 @@ def stitch(
     if missing:
         names = ", ".join(board.get_layer_name(l) for l in missing)
         raise RuntimeError(
-            f"Net '{net_name}' has no filled copper on: {names}.\n"
-            "Pick start/end layers where the net is poured, or fill the zones "
-            "first (press B in the PCB editor)."
+            _(
+                "Net '{net}' has no filled copper on: {layers}.\n"
+                "Pick start/end layers where the net is poured, or fill the zones "
+                "first (press B in the PCB editor)."
+            ).format(net=net_name, layers=names)
         )
 
     region = regions[start_layer].intersection(regions[end_layer])
@@ -827,8 +801,10 @@ def stitch(
 
     if region.is_empty:
         raise RuntimeError(
-            "The selected net's planes do not overlap anywhere on the "
-            "selected layer span."
+            _(
+                "The selected net's planes do not overlap anywhere on the "
+                "selected layer span."
+            )
         )
 
     # Inset so the via body + clearance ring stay inside the fill on all layers.
@@ -836,7 +812,7 @@ def stitch(
     region = region.buffer(-inset)
     if region.is_empty:
         raise RuntimeError(
-            "No room for vias after clearance inset. Try a smaller via diameter."
+            _("No room for vias after clearance inset. Try a smaller via diameter.")
         )
 
     # Grid before subtracting the keepout, so "grid too coarse" and "every position
@@ -861,8 +837,10 @@ def stitch(
     ]
     if not candidates:
         raise RuntimeError(
-            "No via positions fit inside the overlap of the planes.\n"
-            "Try a smaller spacing or via diameter."
+            _(
+                "No via positions fit inside the overlap of the planes.\n"
+                "Try a smaller spacing or via diameter."
+            )
         )
 
     # Every keepout as one flat list of shapes, tested through a single spatial
@@ -895,35 +873,40 @@ def stitch(
     if not points:
         # Only name the optional keepouts that are actually switched on, so this
         # never sends someone off to untick a box that is already off.
+        # These fragments join with a plain " or " regardless of language --
+        # full grammatical localization of a dynamically assembled sentence
+        # is out of scope; each piece is still translated on its own.
         optional = [
             name
             for name, on in (
-                ("other nets' zones", avoid_other_zones),
-                ("footprints", avoid_footprints),
+                (_("other nets' zones"), avoid_other_zones),
+                (_("footprints"), avoid_footprints),
             )
             if on
         ]
         blockers = " or ".join(
-            ["existing vias, pads, tracks or rule areas"] + optional
+            [_("existing vias, pads, tracks or rule areas")] + optional
         )
         untick = (
-            " Or untick " + " or ".join(f"'Avoid {n}'" for n in optional) + "."
+            " " + _("Or untick") + " " + " or ".join(f"'{_('Avoid')} {n}'" for n in optional) + "."
             if optional
             else ""
         )
         raise RuntimeError(
-            f"All {len(candidates)} candidate positions are blocked by {blockers}.\n"
-            "If these zones are already stitched, delete the previous vias first, "
-            "or try a smaller spacing." + untick
+            _(
+                "All {count} candidate positions are blocked by {blockers}.\n"
+                "If these zones are already stitched, delete the previous vias first, "
+                "or try a smaller spacing."
+            ).format(count=len(candidates), blockers=blockers) + untick
         )
 
     if len(points) > VIA_COUNT_WARN:
-        msg = (
-            f"This will place {len(points)} vias, which may make KiCad slow.\n"
+        msg = _(
+            "This will place {count} vias, which may make KiCad slow.\n"
             "Increase the spacing for fewer vias.\n\nPlace them anyway?"
-        )
+        ).format(count=len(points))
         style = wx.YES_NO | wx.ICON_WARNING | wx.STAY_ON_TOP
-        if wx.MessageBox(msg, "Many vias", style, parent) != wx.YES:
+        if wx.MessageBox(msg, _("Many vias"), style, parent) != wx.YES:
             return 0, False
 
     vias = [_make_via(x, y, via_type, start_layer, end_layer, diameter_nm, drill_nm, net) for (x, y) in points]
@@ -933,16 +916,20 @@ def stitch(
     created = board.create_items(vias)
     if len(created) != len(vias):
         raise RuntimeError(
-            f"KiCad accepted only {len(created)} of the {len(vias)} vias.\n"
-            "Check that the drill is smaller than the via diameter."
+            _(
+                "KiCad accepted only {created} of the {total} vias.\n"
+                "Check that the drill is smaller than the via diameter."
+            ).format(created=len(created), total=len(vias))
         )
 
     # create_items reports what it echoed back, not what the board kept.
     placed = board.get_items_by_id([v.id for v in created])
     if len(placed) != len(created):
         raise RuntimeError(
-            f"{len(created)} vias were created but only {len(placed)} are on the "
-            "board. Nothing was rolled back, so check the board before saving."
+            _(
+                "{created} vias were created but only {placed} are on the "
+                "board. Nothing was rolled back, so check the board before saving."
+            ).format(created=len(created), placed=len(placed))
         )
 
     grouped = _group_vias(board, created, net_name, start_layer, end_layer)
@@ -964,7 +951,7 @@ class ViaStitchingDialog(wx.Dialog):
     def __init__(self, parent, net_names, board):
         super().__init__(
             parent,
-            title="Via Stitching Parameters",
+            title=_("Via Stitching Parameters"),
             style=wx.DEFAULT_DIALOG_STYLE | wx.STAY_ON_TOP,
         )
 
@@ -1063,21 +1050,21 @@ class ViaStitchingDialog(wx.Dialog):
         self.end_layer.Bind(wx.EVT_COMBOBOX, lambda evt: self._update_advisory())
 
         if sample_via:
-            via_dia_mm_str = str(to_mm(sample_via.diameter))
-            viar_drill_mm_str = str(to_mm(sample_via.drill_diameter))
-            spacing_mm_str = str(to_mm(sample_via.diameter * 4))
+            via_dia_str = str(to_mm(sample_via.diameter))
+            drill_str = str(to_mm(sample_via.drill_diameter))
+            spacing_str = str(to_mm(sample_via.diameter * 4))
         elif saved:
-            via_dia_mm_str = str(saved.get("via_dia_mm", DEFAULT_VIA_DIAMETER_MM))
-            viar_drill_mm_str = str(saved.get("drill_mm", DEFAULT_DRILL_MM))
-            spacing_mm_str = str(saved.get("spacing_mm", DEFAULT_SPACING_MM))
+            via_dia_str = str(saved.get("via_dia_mm", DEFAULT_VIA_DIAMETER_MM))
+            drill_str = str(saved.get("drill_mm", DEFAULT_DRILL_MM))
+            spacing_str = str(saved.get("spacing_mm", DEFAULT_SPACING_MM))
         else:
-            via_dia_mm_str = str(DEFAULT_VIA_DIAMETER_MM)
-            viar_drill_mm_str = str(DEFAULT_DRILL_MM)
-            spacing_mm_str = str(DEFAULT_SPACING_MM)
+            via_dia_str = str(DEFAULT_VIA_DIAMETER_MM)
+            drill_str = str(DEFAULT_DRILL_MM)
+            spacing_str = str(DEFAULT_SPACING_MM)
 
-        self.via_dia = wx.TextCtrl(self, value=via_dia_mm_str)
-        self.drill = wx.TextCtrl(self, value=viar_drill_mm_str)
-        self.spacing = wx.TextCtrl(self, value=spacing_mm_str)
+        self.via_dia = wx.TextCtrl(self, value=via_dia_str)
+        self.drill = wx.TextCtrl(self, value=drill_str)
+        self.spacing = wx.TextCtrl(self, value=spacing_str)
 
         # Values the dialog put in those three fields itself, which
         # _apply_via_type_defaults is then allowed to swap out. Seeded empty when
@@ -1085,7 +1072,7 @@ class ViaStitchingDialog(wx.Dialog):
         # discards settings that were copied off a real via on the board.
         self._auto_values = (
             set() if sample_via
-            else {via_dia_mm_str, viar_drill_mm_str, spacing_mm_str}
+            else {via_dia_str, drill_str, spacing_str}
         )
 
         self.pattern = wx.Choice(self, choices=PATTERNS)
@@ -1096,18 +1083,18 @@ class ViaStitchingDialog(wx.Dialog):
 
         # if sample via layer starts in an odd layer then it starts with an offset
         if sample_via and sample_via_start_layer % 2 == 0:
-            x_offset_mm_str = str(to_mm(sample_via.diameter * 2))
-            y_offset_mm_str = str(to_mm(sample_via.diameter * 2))
+            x_offset_str = str(to_mm(sample_via.diameter * 2))
+            y_offset_str = str(to_mm(sample_via.diameter * 2))
         elif not sample_via and saved:
-            x_offset_mm_str = str(saved.get("x_offset_mm", to_mm(0.0)))
-            y_offset_mm_str = str(saved.get("y_offset_mm", to_mm(0.0)))
+            x_offset_str = str(saved.get("x_offset_mm", to_mm(0.0)))
+            y_offset_str = str(saved.get("y_offset_mm", to_mm(0.0)))
         else:
-            x_offset_mm_str = str(to_mm(0.0))
-            y_offset_mm_str = str(to_mm(0.0))
+            x_offset_str = str(to_mm(0.0))
+            y_offset_str = str(to_mm(0.0))
 
-        self.x_offset = wx.TextCtrl(self, value=x_offset_mm_str)
-        self.y_offset = wx.TextCtrl(self, value=y_offset_mm_str)
-        offset_tip = (
+        self.x_offset = wx.TextCtrl(self, value=x_offset_str)
+        self.y_offset = wx.TextCtrl(self, value=y_offset_str)
+        offset_tip = _(
             "Shifts this run's grid, so a second pass (e.g. a back-side "
             "microvia stitch) doesn't land on top of the first."
         )
@@ -1128,32 +1115,32 @@ class ViaStitchingDialog(wx.Dialog):
 
         # Not derived from a preselected via either way, so a saved run applies
         # regardless of sample_via.
-        self.avoid_zones = wx.CheckBox(self, label="Avoid zones of other nets")
+        self.avoid_zones = wx.CheckBox(self, label=_("Avoid zones of other nets"))
         self.avoid_zones.SetValue(bool(saved.get("avoid_other_zones", DEFAULT_AVOID_OTHER_ZONES)))
-        self.avoid_zones.SetToolTip(
+        self.avoid_zones.SetToolTip(_(
             "Keep vias out of other nets' filled copper on every layer.\n\n"
             "Off by default: a via through another net's pour is not a DRC "
             "error, because KiCad clears the fill back around it when the "
             "zones are refilled.\n\n"
             "Tick this to leave an inner power plane unperforated. Expect far "
             "fewer vias, since such a plane often covers most of the board."
-        )
+        ))
 
-        self.avoid_footprints = wx.CheckBox(self, label="Avoid footprints")
+        self.avoid_footprints = wx.CheckBox(self, label=_("Avoid footprints"))
         self.avoid_footprints.SetValue(bool(saved.get("avoid_footprints", DEFAULT_AVOID_FOOTPRINTS)))
-        self.avoid_footprints.SetToolTip(
+        self.avoid_footprints.SetToolTip(_(
             "Keep vias out from under every component's bounding box.\n\n"
             "This is about mechanical fit, not clearance, so it applies "
             "whatever net the footprint is on.\n\n"
             "Off by default: a thermal via array under a QFN or BGA ground pad "
             "is a normal use of via stitching, and this would block it."
-        )
+        ))
 
         self.avoid_same_net_pads = wx.CheckBox(
-            self, label="Avoid pads already on this net"
+            self, label=_("Avoid pads already on this net")
         )
         self.avoid_same_net_pads.SetValue(bool(saved.get("avoid_same_net_pads", DEFAULT_AVOID_SAME_NET_PADS)))
-        self.avoid_same_net_pads.SetToolTip(
+        self.avoid_same_net_pads.SetToolTip(_(
             "Keep vias off the copper of pads that are already on the net being "
             "stitched.\n\n"
             "Off by default: dropping a via array straight onto a QFN or BGA "
@@ -1161,20 +1148,20 @@ class ViaStitchingDialog(wx.Dialog):
             "Tick this to leave same-net pads alone, for example to keep vias out "
             "of a paste-critical pad. Pads on every other net are avoided either "
             "way, with their full clearance."
-        )
+        ))
 
         self.main_sizer = wx.BoxSizer(wx.VERTICAL)
 
         self._make_group(self.main_sizer, [
-            ("Net Name:", self.net)
+            (_("Net Name:"), self.net)
         ])
 
         self._make_group(self.main_sizer, [
-            ("Via Type:", self.via_type),
-            ("Start Layer:", self.start_layer),
-            ("End Layer:", self.end_layer),
-            ("Via Diameter (mm):", self.via_dia),
-            ("Drill (mm):", self.drill)
+            (_("Via Type:"), self.via_type),
+            (_("Start Layer:"), self.start_layer),
+            (_("End Layer:"), self.end_layer),
+            (_("Via Diameter (mm):"), self.via_dia),
+            (_("Drill (mm):"), self.drill),
         ])
 
         # Live, non-blocking indicator for _via_type_advisory. Never a dialog
@@ -1186,13 +1173,13 @@ class ViaStitchingDialog(wx.Dialog):
         self.main_sizer.Add(self.advisory_label, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.TOP, 8)
 
         self._make_group(self.main_sizer, [
-            ("Via Pattern:", self.pattern),
-            ("Spacing (mm):", self.spacing),
-            ("X-Offset (mm):", self.x_offset),
-            ("Y-Offset (mm):", self.y_offset),
-            ("Zones:", self.avoid_zones),
-            ("Footprints:", self.avoid_footprints),
-            ("Same-net pads:", self.avoid_same_net_pads)
+            (_("Via Pattern:"), self.pattern),
+            (_("Spacing (mm):"), self.spacing),
+            (_("X-Offset (mm):"), self.x_offset),
+            (_("Y-Offset (mm):"), self.y_offset),
+            (_("Zones:"), self.avoid_zones),
+            (_("Footprints:"), self.avoid_footprints),
+            (_("Same-net pads:"), self.avoid_same_net_pads),
         ])
 
         # CreateButtonSizer, not a hand-built one: it orders OK/Cancel to match
@@ -1200,11 +1187,11 @@ class ViaStitchingDialog(wx.Dialog):
         # a fixed left-to-right order that only matches some platforms.
         buttons = self.CreateButtonSizer(wx.OK | wx.CANCEL)
 
-        self.reset_btn = wx.Button(self, label="Reset")
-        self.reset_btn.SetToolTip(
+        self.reset_btn = wx.Button(self, label=_("Reset"))
+        self.reset_btn.SetToolTip(_(
             "Restore the built-in defaults and clear the settings saved from "
             "previous runs."
-        )
+        ))
         self.reset_btn.Bind(wx.EVT_BUTTON, lambda evt: self._on_reset())
 
         button_row = wx.BoxSizer(wx.HORIZONTAL)
@@ -1394,7 +1381,9 @@ class ViaStitchingDialog(wx.Dialog):
         end_layer = self.layer_map[self.end_layer.GetStringSelection()]
 
         if start_layer == end_layer:
-            raise ValueError(f"Start and end layers must not be the same ({start_layer})")
+            raise ValueError(
+                _("Start and end layers must not be the same ({layer})").format(layer=start_layer)
+            )
 
         try:
             via_dia_mm = float(self.via_dia.GetValue())
@@ -1403,28 +1392,30 @@ class ViaStitchingDialog(wx.Dialog):
             x_offset_mm = float(self.x_offset.GetValue())
             y_offset_mm = float(self.y_offset.GetValue())
         except ValueError:
-            raise ValueError("Via diameter, drill and spacing and offsets must be numbers (mm).")
+            raise ValueError(_("Via diameter, drill and spacing and offsets must be numbers (mm)."))
 
         # isfinite first: nan parses fine as a float and then compares False
         # against everything, so it would slip past both checks below and only
         # blow up later, inside from_mm().
         if not all(math.isfinite(v) for v in (via_dia_mm, drill_mm, spacing_mm)):
             raise ValueError(
-                "Via diameter, drill and spacing must be real numbers (mm)."
+                _("Via diameter, drill and spacing must be real numbers (mm).")
             )
         if min(via_dia_mm, drill_mm, spacing_mm) <= 0:
             raise ValueError(
-                "Via diameter, drill and spacing must all be greater than zero."
+                _("Via diameter, drill and spacing must all be greater than zero.")
             )
         if drill_mm >= via_dia_mm:
             raise ValueError(
-                f"The drill ({drill_mm} mm) must be smaller than the via diameter "
-                f"({via_dia_mm} mm)."
+                _(
+                    "The drill ({drill} mm) must be smaller than the via diameter "
+                    "({dia} mm)."
+                ).format(drill=drill_mm, dia=via_dia_mm)
             )
 
         net_name = self.net.GetValue().strip()
         if not net_name:
-            raise ValueError("Pick the net to stitch.")
+            raise ValueError(_("Pick the net to stitch."))
 
         return {
             "via_type": via_type,
@@ -1449,7 +1440,7 @@ class ErrorDialog(wx.Dialog):
     def __init__(self, parent, summary, details):
         super().__init__(
             parent,
-            title="Via Stitching Error",
+            title=_("Via Stitching Error"),
             size=(660, 420),
             style=wx.DEFAULT_DIALOG_STYLE | wx.RESIZE_BORDER | wx.STAY_ON_TOP,
         )
@@ -1481,7 +1472,7 @@ def _api_enabled_in_config():
     here. The setting on disk is what tells them apart.
     """
     try:
-        for config_dir in _kicad_config_dirs():
+        for config_dir in kicad_config_dirs():
             path = os.path.join(config_dir, "kicad_common.json")
             if os.path.exists(path):
                 with open(path, encoding="utf-8") as fh:
@@ -1523,13 +1514,13 @@ def _is_token_mismatch(exc):
     return isinstance(exc, ApiError) and exc.code == ApiStatusCode.AS_TOKEN_MISMATCH
 
 
-BUSY_HELP = (
+BUSY_HELP = _(
     "KiCad is busy and refused the request.\n\n"
     "It is most likely still refilling the zones from a previous run. Wait for "
     "the PCB editor to go idle, then run this again."
 )
 
-TOKEN_HELP = (
+TOKEN_HELP = _(
     "Another KiCad instance owns the plugin API.\n\n"
     "KiCad serves the API on a single socket, and whichever instance started "
     "first holds it. This plugin was launched from a different one, so the "
@@ -1539,7 +1530,7 @@ TOKEN_HELP = (
     "up, so the instance you keep has to be restarted, not just left open."
 )
 
-NO_BOARD_HELP = (
+NO_BOARD_HELP = _(
     "KiCad's API server answered but did not hand over a board.\n\n"
     "Open a board in the PCB editor and run this again."
 )
@@ -1553,28 +1544,28 @@ def _connection_help(enabled, dial_failed=True):
     confident advice is gated on dial_failed.
     """
     if not dial_failed:
-        return (
+        return _(
             "KiCad did not reply in time.\n\n"
             "It is probably busy, for example filling zones. Wait for it to "
             "finish and run this again."
         )
     if enabled is False:
         # Never mention restarting on its own here: the setting is the real problem.
-        return (
+        return _(
             "KiCad's API server is switched off.\n\n"
             "Turn on 'Enable KiCad API' in Preferences > Plugins, then restart "
             "KiCad. The server is only started while KiCad launches, so the "
             "setting does not take effect until then."
         )
     if enabled is True:
-        return (
+        return _(
             "KiCad's API server is enabled but not listening.\n\n"
             "Restart KiCad. The server is only started while KiCad launches, so "
             "switching it on in Preferences does nothing for an instance that is "
             "already running.\n\n"
             "Then open a board in the PCB editor and run this again."
         )
-    return (
+    return _(
         "Could not talk to KiCad.\n\n"
         "Check that 'Enable KiCad API' is on in Preferences > Plugins, restart "
         "KiCad, and make sure a board is open in the PCB editor."
@@ -1591,7 +1582,7 @@ def _to_stderr(text):
 
 def _msg(parent, text, style):
     """Message box that stays above the PCB editor."""
-    wx.MessageBox(text, "Via Stitching", style | wx.STAY_ON_TOP, parent)
+    wx.MessageBox(text, _("Via Stitching"), style | wx.STAY_ON_TOP, parent)
 
 
 def _report(parent, summary, exc):
@@ -1693,17 +1684,19 @@ def main():
             del busy
             _report(
                 dlg,
-                BUSY_HELP if _is_busy(exc) else "Via Stitching failed while placing vias.",
+                BUSY_HELP if _is_busy(exc) else _("Via Stitching failed while placing vias."),
                 exc,
             )
             return
         del busy
 
         if count:
-            text = f"Placed {count} stitching vias on net '{params['net_name']}'."
+            text = _("Placed {count} stitching vias on net '{net}'.").format(
+                count=count, net=params["net_name"]
+            )
             if not grouped:
-                text += (
-                    "\n\nKiCad would not group them, so they delete individually "
+                text += "\n\n" + _(
+                    "KiCad would not group them, so they delete individually "
                     "rather than as a set. The vias themselves are fine."
                 )
             _msg(dlg, text, wx.OK | wx.ICON_INFORMATION)

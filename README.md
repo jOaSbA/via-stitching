@@ -132,6 +132,20 @@ each other's drills, and a grid with no room to spare is left exactly on pitch.
 
 If you see "No filled copper for net ...", fill the zones (`B`) and run again.
 
+## Localization
+
+The dialog follows whatever language KiCad itself is configured to show
+(Preferences > General). Supported languages:
+
+- English (source)
+- Dutch
+- German
+- French
+
+Anything without a catalog falls back to English. Catalogs live in
+`plugins/locale/` alongside the English source strings. The three shipped
+translations are machine-drafted and flagged as such in their files.
+
 ## Building the package
 
 Run `python build.py`. It produces `dist/via-stitching-<version>.zip` in the

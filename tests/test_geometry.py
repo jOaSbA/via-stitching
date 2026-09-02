@@ -33,6 +33,9 @@ from via_stitching_action import (  # noqa: E402
     stitch,
 )
 
+import _i18n  # noqa: E402
+import _kicad_config  # noqa: E402
+
 MM = from_mm(1.0)
 BOX = (0, 0, 10 * MM, 10 * MM)
 
@@ -721,6 +724,27 @@ def test_settings_persist_across_dialogs_and_reset_clears_them():
         vsa._settings_path = original_settings_path
         import shutil
         shutil.rmtree(tmp_dir, ignore_errors=True)
+
+
+def test_translation_catalog_falls_back_to_source_text():
+    # No catalog loaded for a nonsense language code: every lookup is a
+    # pass-through to the English source string, never a KeyError or None.
+    empty = _i18n._catalog("__no_such_language__")
+    assert empty == {}
+
+    original = _i18n._active_catalog
+    try:
+        _i18n._active_catalog = {"Reset": "Reinstellen"}
+        assert _i18n._("Reset") == "Reinstellen"
+        assert _i18n._("Some string with no translation") == "Some string with no translation"
+    finally:
+        _i18n._active_catalog = original
+
+
+def test_kicad_config_readers_do_not_raise():
+    # Reading the real config must not raise, whatever is installed -- same
+    # posture as _api_enabled_in_config's own test above.
+    assert _kicad_config.ui_language() is None or isinstance(_kicad_config.ui_language(), str)
 
 
 def _fake_board(pads=(), vias=(), tracks=(), size_mm=20.0, nets=("GND", "SIG")):
