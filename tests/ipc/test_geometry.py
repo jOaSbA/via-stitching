@@ -1,7 +1,7 @@
 # Offline self-check for the grid and via construction. No KiCad needed.
 #
 # Run with the plugin's own venv interpreter, which already has wx, kipy and shapely:
-#   "$LOCALAPPDATA/KiCad/10.0/python-environments/com.github.jOaSbA.via-stitching/Scripts/python" tests/test_geometry.py
+#   "$LOCALAPPDATA/KiCad/10.0/python-environments/com.github.jOaSbA.via-stitching/Scripts/python" tests/ipc/test_geometry.py
 #
 # License: GPL-3.0-or-later
 
@@ -9,7 +9,7 @@ import math
 import os
 import sys
 
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "plugins"))
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "plugins"))
 
 from kipy.board_types import BoardLayer, Net, PSS_CIRCLE, ViaType  # noqa: E402
 from kipy.errors import ConnectionError as KiCadConnectionError  # noqa: E402
