@@ -1,10 +1,19 @@
-# TEMPORARY. Runs the legacy suites, and the built archive's own smoke test, on
-# every KiCad the package claims: 6 and 7 from stock Ubuntu, 8 and 9 from the
-# KiCad PPAs. Delete once 8 and 9 are green.
+# Runs the legacy suites, and the built archive's own smoke test, on every
+# KiCad the package claims: 6 and 7 from stock Ubuntu, 8 and 9 from the KiCad
+# PPAs. This is the only coverage those versions have, and it has already
+# caught two silent layer-handling bugs on 9, so it runs before every release.
+#
+# Not on every push: it installs KiCad four times over. Trigger it by hand from
+# the Actions tab when plugins_legacy/ changes.
 
-name: legacy-matrix (temporary)
+name: legacy-matrix
 
-on: [push, workflow_dispatch]
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v*"
+
 
 jobs:
   legacy:
