@@ -35,7 +35,6 @@ jobs:
         run: xvfb-run -a python3 tests/legacy/_api_probe.py
 
       - name: Run the legacy suites
-        continue-on-error: true
         run: |
           failed=""
           for t in tests/legacy/test_*.py; do

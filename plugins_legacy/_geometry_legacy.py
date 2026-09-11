@@ -9,6 +9,11 @@
 # accessors). This module is the consolidated, production version of that
 # work; the spikes remain as the record of what was checked and why.
 
+# Note on the shapely calls below: buffer()'s second argument is passed
+# positionally on purpose. shapely 1.8 (what Ubuntu 22.04 ships, and 22.04 is
+# a KiCad 6 distro) names it `resolution`; shapely 2.x renamed it `quad_segs`.
+# Positional works on both, the keyword only on one.
+
 import math
 import re
 from collections import defaultdict
@@ -200,7 +205,7 @@ def via_keepout_shapes(board, via_radius_nm, span, hole_margin_nm):
             continue
         r = via_radius_nm + track.GetDrillValue() // 2 + hole_margin_nm
         pos = track.GetPosition()
-        shapes.append(Point(pos.x, pos.y).buffer(r, quad_segs=8))
+        shapes.append(Point(pos.x, pos.y).buffer(r, 8))
     return shapes
 
 
@@ -223,7 +228,7 @@ def pad_drill_keepout_shapes(board, via_radius_nm, hole_margin_nm):
             pos = pad.GetPosition()
             if long_r == short_r:
                 r = via_radius_nm + long_r + hole_margin_nm
-                shapes.append(Point(pos.x, pos.y).buffer(r, quad_segs=8))
+                shapes.append(Point(pos.x, pos.y).buffer(r, 8))
                 continue
             half = long_r - short_r
             a = -math.radians(pad.GetOrientationDegrees())
@@ -234,7 +239,7 @@ def pad_drill_keepout_shapes(board, via_radius_nm, hole_margin_nm):
                 dx = round(half * math.cos(a))
                 dy = round(half * math.sin(a))
             seg = LineString([(pos.x - dx, pos.y - dy), (pos.x + dx, pos.y + dy)])
-            shapes.append(seg.buffer(via_radius_nm + short_r + hole_margin_nm, quad_segs=8))
+            shapes.append(seg.buffer(via_radius_nm + short_r + hole_margin_nm, 8))
     return shapes
 
 
@@ -257,7 +262,7 @@ def track_keepout_shapes(board, net_name, via_radius_nm, clearances, span):
             s, e = track.GetStart(), track.GetEnd()
             coords = [(s.x, s.y), (e.x, e.y)]
         r = via_radius_nm + track.GetWidth() // 2 + clearances[track.GetNetname()]
-        shapes.append(LineString(coords).buffer(r, quad_segs=8))
+        shapes.append(LineString(coords).buffer(r, 8))
     return shapes
 
 
@@ -276,7 +281,7 @@ def zone_keepout_shapes(zones, net_name, via_radius_nm, clearances, span):
             if not zone.GetLayerSet().Contains(layer):
                 continue
             for poly in polyset_to_shapely_polygons(zone.GetFilledPolysList(layer)):
-                shapes.append(poly.buffer(margin, quad_segs=8))
+                shapes.append(poly.buffer(margin, 8))
     return shapes
 
 
@@ -292,7 +297,7 @@ def rule_area_keepout_shapes(zones, via_radius_nm, span):
         if outline.OutlineCount() == 0:
             continue
         for poly in polyset_to_shapely_polygons(outline):
-            shapes.append(poly.buffer(via_radius_nm, quad_segs=8))
+            shapes.append(poly.buffer(via_radius_nm, 8))
     return shapes
 
 
@@ -356,7 +361,7 @@ def pad_copper_keepout_shapes(board, net_name, via_radius_nm, clearances, span,
             angle_deg = pad.GetOrientationDegrees()
             if angle_deg:
                 rect = affinity.rotate(rect, -angle_deg, origin="center")
-            shapes.append(rect.buffer(margin, quad_segs=8))
+            shapes.append(rect.buffer(margin, 8))
     return shapes
 
 

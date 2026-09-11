@@ -262,10 +262,18 @@ def _nudged(x, y, nudge_r, allowed, blocked):
 def _blocked_predicate(shapes):
     if not shapes:
         return lambda x, y: False
-    from shapely import STRtree
     from shapely.geometry import Point
+    from shapely.strtree import STRtree  # importable from shapely itself only on 2.x
 
     tree = STRtree(shapes)
+    try:
+        tree.query(Point(0, 0), predicate="intersects")
+    except TypeError:
+        # shapely 1.8, which is what Ubuntu 22.04 ships and 22.04 is a KiCad 6
+        # distro. Its query() takes no predicate and answers with the geometries
+        # whose bounding boxes overlap, so the real hit test has to happen here
+        # or every via would be blocked by a neighbour's bounding box.
+        return lambda x, y: any(s.intersects(Point(x, y)) for s in tree.query(Point(x, y)))
     return lambda x, y: len(tree.query(Point(x, y), predicate="intersects")) > 0
 
 

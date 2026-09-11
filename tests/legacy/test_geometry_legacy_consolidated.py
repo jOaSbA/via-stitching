@@ -10,12 +10,15 @@ sys.path.insert(0, __file__.rsplit("tests", 1)[0] + "plugins")
 sys.path.insert(0, __file__.rsplit("tests", 1)[0] + "plugins_legacy")
 
 import pcbnew
-import via_stitching_action as vsa  # noqa: E402  (real shared grid/nudge)
+try:  # the IPC module's grid/nudge, to prove both backends share the maths
+    import via_stitching_action as vsa  # noqa: E402
+except ImportError:  # kipy is not installed (CI, or any KiCad 6 box)
+    import via_stitching_action_legacy as vsa  # noqa: E402
 import _geometry_legacy as geo  # noqa: E402
 
 from shapely.geometry import Point
 from shapely.prepared import prep
-from shapely import STRtree
+from shapely.strtree import STRtree
 
 MM = 1_000_000
 

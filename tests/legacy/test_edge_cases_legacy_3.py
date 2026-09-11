@@ -308,7 +308,10 @@ def test_full_pipeline_respects_higher_netclass_clearance():
         out = subprocess.run(
             [sys.executable, __file__.rsplit("test_", 1)[0] + "_netclass_gap_check.py",
              str(vcc_clearance_nm)],
-            capture_output=True, text=True, check=True,
+            capture_output=True, text=True,
+        )
+        assert out.returncode == 0, (
+            "the gap check subprocess failed: " + out.stdout + out.stderr
         )
         return int(out.stdout.strip())
 
