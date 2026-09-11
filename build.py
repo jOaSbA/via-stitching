@@ -4,9 +4,9 @@
 Run from the repository root:
 
     python build.py            # the IPC build, for KiCad 10 and later
-    python build.py --legacy   # the SWIG build, for KiCad 6, 7 and 8
+    python build.py --legacy   # the SWIG build, for KiCad 6 to 9
 
-It produces ``dist/<repo>-<version>.zip`` (or ``<repo>-legacy-<version>.zip``)
+It produces ``dist/<repo>-<version>.zip`` (or ``<repo>-swig-<version>.zip``)
 laid out the way the KiCad Plugin and Content Manager expects (``plugins/``,
 ``resources/icon.png``, ``metadata.json``), then fills ``download_sha256``,
 ``download_size`` and ``install_size`` back into the top-level ``metadata.json``
@@ -38,9 +38,10 @@ DIST = os.path.join(HERE, "dist")
 # plugins/ like any other action plugin.
 LAYOUTS = {
     "ipc": {"plugins": "plugins", "resources": "resources"},
-    # The string catalogs live with the IPC sources but ship in both packages.
+    # The string catalogs and the toolbar icon live with the IPC sources and
+    # ship in both packages, rather than as a second copy that can drift.
     "swig": {"plugins_legacy": "plugins", "plugins/locale": "plugins/locale",
-             "resources": "resources"},
+             "plugins/icon.png": "plugins/icon.png", "resources": "resources"},
 }
 # Never ship these.
 EXCLUDE_NAMES = {"__pycache__", ".DS_Store"}
@@ -65,6 +66,9 @@ def _collect(layout):
     """Yield (abs_path, arcname) for every file to place in the archive."""
     for top, packaged_as in layout.items():
         base = os.path.join(HERE, top)
+        if os.path.isfile(base):
+            yield base, packaged_as
+            continue
         for root, dirs, files in os.walk(base):
             dirs[:] = [d for d in dirs if d not in EXCLUDE_NAMES]
             for fn in files:
@@ -87,7 +91,7 @@ def newest(meta, runtime):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--legacy", action="store_true",
-                        help="build the SWIG package for KiCad 6, 7 and 8")
+                        help="build the SWIG package for KiCad 6 to 9")
     args = parser.parse_args()
     runtime = "swig" if args.legacy else "ipc"
 
@@ -99,7 +103,9 @@ def main():
     version = latest["version"]
 
     os.makedirs(DIST, exist_ok=True)
-    name = "{}-legacy-{}".format(REPO, version) if args.legacy else "{}-{}".format(REPO, version)
+    # "swig" is the PCM's own word for the runtime. This name shows up in the
+    # release and in the PCM's download log, so it is user-facing.
+    name = "{}-swig-{}".format(REPO, version) if args.legacy else "{}-{}".format(REPO, version)
     zip_path = os.path.join(DIST, "{}.zip".format(name))
 
     # metadata.json inside the archive: only the version being packaged, with the

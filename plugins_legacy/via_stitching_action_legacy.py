@@ -30,7 +30,7 @@ import _geometry_legacy as geo  # noqa: E402
 from _i18n_legacy import _  # noqa: E402
 from _kicad_config_legacy import kicad_config_dirs  # noqa: E402
 
-VERSION = "0.1.0-legacy"
+VERSION = "1.2.0"
 
 DEFAULT_NET = "GND"
 DEFAULT_VIA_DIAMETER_MM = 0.6
@@ -405,12 +405,27 @@ def stitch(board, via_type, start_layer, end_layer, net_name, via_dia_mm, drill_
     return len(vias), group is not None
 
 
+def _icon_path():
+    """The toolbar icon: next to this file once packaged, one directory over in
+    the source tree. Shared with the IPC build so the two cannot drift apart."""
+    here = os.path.dirname(os.path.abspath(__file__))
+    for candidate in (os.path.join(here, "icon.png"),
+                      os.path.join(os.path.dirname(here), "plugins", "icon.png")):
+        if os.path.exists(candidate):
+            return candidate
+    return ""  # KiCad draws its default placeholder
+
+
 class ViaStitchingLegacy(pcbnew.ActionPlugin):
     def defaults(self):
-        self.name = "Via Stitching (legacy)"
+        # The only name a user on KiCad 6 to 9 ever sees. They are not
+        # running an old version of anything, just the build for their KiCad.
+        self.name = "Via Stitching"
         self.category = "Modify PCB"
         self.description = "Stitch copper zones together with a grid of vias on a chosen net"
         self.show_toolbar_button = True
+        self.icon_file_name = _icon_path()
+        self.dark_icon_file_name = self.icon_file_name
 
     def Run(self):
         board = pcbnew.GetBoard()

@@ -5,10 +5,11 @@
 # there rather than from the repo, and stitches a real board. Run it with the
 # python.exe of whichever KiCad you want to check:
 #
-#   "C:/Program Files/KiCad/6.0/bin/python.exe" tests/legacy/zip_smoke.py dist/via-stitching-legacy-0.1.0.zip
+#   "C:/Program Files/KiCad/6.0/bin/python.exe" tests/legacy/zip_smoke.py dist/via-stitching-swig-1.2.0.zip
 #
 # Prints one line per check and exits non-zero on the first failure.
 
+import glob
 import os
 import sys
 import tempfile
@@ -44,6 +45,12 @@ def main(zip_path):
     import via_stitching_action_legacy as vsl
 
     print("import     ok, version " + vsl.VERSION)
+
+    # The toolbar icon is shared with the IPC build and only lands next to the
+    # plugin at package time, so a broken layout shows up here and nowhere else.
+    icon = vsl._icon_path()
+    assert icon.startswith(plugins) and os.path.exists(icon), icon
+    print("icon       " + os.path.relpath(icon, workdir).replace(os.sep, "/"))
 
     import _geometry_legacy as geo
 
@@ -87,4 +94,7 @@ def main(zip_path):
 
 
 if __name__ == "__main__":
-    main(sys.argv[1] if len(sys.argv) > 1 else "dist/via-stitching-legacy-0.1.0.zip")
+    args = sys.argv[1:] or sorted(glob.glob("dist/via-stitching-swig-*.zip"))
+    if not args:
+        raise SystemExit("no archive given and none found in dist/")
+    main(args[-1])
