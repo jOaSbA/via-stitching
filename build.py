@@ -38,7 +38,9 @@ DIST = os.path.join(HERE, "dist")
 # plugins/ like any other action plugin.
 LAYOUTS = {
     "ipc": {"plugins": "plugins", "resources": "resources"},
-    "swig": {"plugins_legacy": "plugins", "resources": "resources"},
+    # The string catalogs live with the IPC sources but ship in both packages.
+    "swig": {"plugins_legacy": "plugins", "plugins/locale": "plugins/locale",
+             "resources": "resources"},
 }
 # Never ship these.
 EXCLUDE_NAMES = {"__pycache__", ".DS_Store"}

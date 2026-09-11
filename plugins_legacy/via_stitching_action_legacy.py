@@ -27,6 +27,7 @@ import wx.adv
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import _geometry_legacy as geo  # noqa: E402
+from _i18n_legacy import _  # noqa: E402
 from _kicad_config_legacy import kicad_config_dirs  # noqa: E402
 
 VERSION = "0.1.0-legacy"
@@ -197,9 +198,9 @@ def _via_type_advisory(board, via_type, start_layer, end_layer):
     if via_type == pcbnew.VIATYPE_MICROVIA:
         if not (starts_outer or ends_outer) or len(geo.span_layers(board, start_layer, end_layer)) != 2:
             return (
-                "This isn't a standard microvia: a microvia connects an "
+                _("This isn't a standard microvia: a microvia connects an "
                 "outer layer (F.Cu or B.Cu) to the layer right next to it. "
-                "KiCad's DRC will likely flag this via."
+                "KiCad's DRC will likely flag this via.")
             )
     elif via_type == pcbnew.VIATYPE_BLIND_BURIED:
         if not (starts_outer or ends_outer):
@@ -294,7 +295,9 @@ def stitch(board, via_type, start_layer, end_layer, net_name, via_dia_mm, drill_
 
     net = next((n for n in board.GetNetsByNetcode().values() if n.GetNetname() == net_name), None)
     if net is None:
-        raise RuntimeError(f"Net '{net_name}' not found on the board.")
+        raise RuntimeError(
+            _("Net '{net}' not found on the board.").format(net=net_name)
+        )
 
     zones = list(board.Zones())
     span = geo.span_layers(board, start_layer, end_layer)
@@ -312,9 +315,11 @@ def stitch(board, via_type, start_layer, end_layer, net_name, via_dia_mm, drill_
     if missing:
         names = ", ".join(board.GetLayerName(l) for l in missing)
         raise RuntimeError(
-            f"Net '{net_name}' has no filled copper on: {names}.\n"
-            "Pick start/end layers where the net is poured, or fill the zones "
-            "first (press B in the PCB editor)."
+            _(
+                "Net '{net}' has no filled copper on: {layers}.\n"
+                "Pick start/end layers where the net is poured, or fill the zones "
+                "first (press B in the PCB editor)."
+            ).format(net=net_name, layers=names)
         )
 
     region = region_by_layer[start_layer].intersection(region_by_layer[end_layer])
@@ -323,12 +328,12 @@ def stitch(board, via_type, start_layer, end_layer, net_name, via_dia_mm, drill_
             region = region.intersection(region_by_layer[layer])
 
     if region.is_empty:
-        raise RuntimeError("The selected net's planes do not overlap anywhere on the selected layer span.")
+        raise RuntimeError(_("The selected net's planes do not overlap anywhere on the selected layer span."))
 
     inset = via_radius_nm + _from_mm(EDGE_EPS_MM)
     region = region.buffer(-inset)
     if region.is_empty:
-        raise RuntimeError("No room for vias after clearance inset. Try a smaller via diameter.")
+        raise RuntimeError(_("No room for vias after clearance inset. Try a smaller via diameter."))
 
     minx, miny, maxx, maxy = region.bounds
     shifted_bounds = (minx + x_offset_nm, miny + y_offset_nm, maxx + x_offset_nm, maxy + y_offset_nm)
@@ -338,7 +343,7 @@ def stitch(board, via_type, start_layer, end_layer, net_name, via_dia_mm, drill_
         (x, y) for (x, y) in _grid_points(shifted_bounds, spacing_nm, pattern) if allowed(Point(x, y))
     ]
     if not candidates:
-        raise RuntimeError("No via positions fit inside the overlap of the planes.\nTry a smaller spacing or via diameter.")
+        raise RuntimeError(_("No via positions fit inside the overlap of the planes.\nTry a smaller spacing or via diameter."))
 
     clearances = geo.net_clearances(board, net_name)
     keepout = geo.via_keepout_shapes(board, via_radius_nm, span_set, _from_mm(HOLE_MARGIN_MM))
@@ -364,17 +369,22 @@ def stitch(board, via_type, start_layer, end_layer, net_name, via_dia_mm, drill_
 
     if not points:
         raise RuntimeError(
-            f"All {len(candidates)} candidate positions are blocked by existing vias, "
-            "pads, tracks or rule areas.\nIf these zones are already stitched, delete "
-            "the previous vias first, or try a smaller spacing."
+            _(
+                "All {count} candidate positions are blocked by {blockers}.\n"
+                "If these zones are already stitched, delete the previous vias "
+                "first, or try a smaller spacing."
+            ).format(
+                count=len(candidates),
+                blockers=_("existing vias, pads, tracks or rule areas"),
+            )
         )
 
     if len(points) > VIA_COUNT_WARN:
-        msg = (
-            f"This will place {len(points)} vias, which may make KiCad slow.\n"
+        msg = _(
+            "This will place {count} vias, which may make KiCad slow.\n"
             "Increase the spacing for fewer vias.\n\nPlace them anyway?"
-        )
-        if wx.MessageBox(msg, "Many vias", wx.YES_NO | wx.ICON_WARNING, parent) != wx.YES:
+        ).format(count=len(points))
+        if wx.MessageBox(msg, _("Many vias"), wx.YES_NO | wx.ICON_WARNING, parent) != wx.YES:
             return 0, False
 
     vias = [
@@ -417,20 +427,61 @@ class ViaStitchingLegacy(pcbnew.ActionPlugin):
             placed, grouped = stitch(board, parent=parent, **values)
             if placed:
                 pcbnew.Refresh()
-                wx.MessageBox(
-                    f"Placed {placed} vias"
-                    + ("" if grouped else " (grouping failed, they were still placed)"),
-                    "Via Stitching",
-                    wx.OK | wx.ICON_INFORMATION,
-                    parent,
+                text = _("Placed {count} stitching vias on net '{net}'.").format(
+                    count=placed, net=values["net_name"]
                 )
+                if not grouped:
+                    text += "\n\n" + _(
+                        "KiCad would not group them, so they delete individually "
+                        "rather than as a set. The vias themselves are fine."
+                    )
+                wx.MessageBox(text, _("Via Stitching"), wx.OK | wx.ICON_INFORMATION, parent)
         except (RuntimeError, ValueError) as exc:
-            wx.MessageBox(str(exc), "Via Stitching", wx.OK | wx.ICON_ERROR, parent)
+            wx.MessageBox(str(exc), _("Via Stitching"), wx.OK | wx.ICON_ERROR, parent)
         except Exception:
-            wx.MessageBox(
-                "Via Stitching hit an unexpected error:\n\n" + traceback.format_exc(),
-                "Via Stitching", wx.OK | wx.ICON_ERROR, parent,
-            )
+            _report(parent, _("Via Stitching hit an unexpected error."),
+                    traceback.format_exc())
+
+
+class ErrorDialog(wx.Dialog):
+    """Unexpected-failure report. Selectable, so Ctrl+A and Ctrl+C paste into a
+    bug report. Ported from the IPC build, which had it and this one did not:
+    a traceback inside a MessageBox cannot be copied out of."""
+
+    def __init__(self, parent, summary, details):
+        super().__init__(
+            parent,
+            title=_("Via Stitching Error"),
+            size=(660, 420),
+            style=wx.DEFAULT_DIALOG_STYLE | wx.RESIZE_BORDER | wx.STAY_ON_TOP,
+        )
+
+        label = wx.StaticText(self, label=summary)
+        label.Wrap(620)
+
+        text = wx.TextCtrl(
+            self,
+            value=details,
+            style=wx.TE_MULTILINE | wx.TE_READONLY | wx.TE_DONTWRAP,
+        )
+        text.SetFont(wx.Font(wx.FontInfo(9).Family(wx.FONTFAMILY_TELETYPE)))
+
+        outer = wx.BoxSizer(wx.VERTICAL)
+        outer.Add(label, 0, wx.LEFT | wx.RIGHT | wx.TOP, 12)
+        outer.Add(text, 1, wx.EXPAND | wx.ALL, 12)
+        outer.Add(
+            self.CreateButtonSizer(wx.OK), 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, 12
+        )
+        self.SetSizer(outer)
+
+
+def _report(parent, summary, exc_text):
+    """Show an unexpected failure in a dialog its text can be copied out of."""
+    dlg = ErrorDialog(parent, summary, exc_text)
+    try:
+        dlg.ShowModal()
+    finally:
+        dlg.Destroy()
 
 
 class ViaStitchingDialogLegacy(wx.Dialog):
@@ -454,7 +505,7 @@ class ViaStitchingDialogLegacy(wx.Dialog):
     def __init__(self, parent, board):
         super().__init__(
             parent,
-            title="Via Stitching Parameters (legacy)",
+            title=_("Via Stitching Parameters"),
             style=wx.DEFAULT_DIALOG_STYLE | wx.STAY_ON_TOP,
         )
         self.board = board
@@ -540,35 +591,44 @@ class ViaStitchingDialogLegacy(wx.Dialog):
         self.x_offset = wx.TextCtrl(self, value=x_offset_str)
         self.y_offset = wx.TextCtrl(self, value=y_offset_str)
         offset_tip = (
-            "Shifts this run's grid, so a second pass (e.g. a back-side "
-            "microvia stitch) doesn't land on top of the first."
+            _("Shifts this run's grid, so a second pass (e.g. a back-side "
+            "microvia stitch) doesn't land on top of the first.")
         )
         self.x_offset.SetToolTip(offset_tip)
         self.y_offset.SetToolTip(offset_tip)
 
-        self.avoid_zones = wx.CheckBox(self, label="Avoid zones of other nets")
+        self.avoid_zones = wx.CheckBox(self, label=_("Avoid zones of other nets"))
         self.avoid_zones.SetValue(bool(saved.get("avoid_other_zones", DEFAULT_AVOID_OTHER_ZONES)))
-        self.avoid_zones.SetToolTip(
+        self.avoid_zones.SetToolTip(_(
             "Keep vias out of other nets' filled copper on every layer.\n\n"
             "Off by default: a via through another net's pour is not a DRC "
-            "error, since KiCad clears the fill back around it on refill."
-        )
+            "error, because KiCad clears the fill back around it when the "
+            "zones are refilled.\n\n"
+            "Tick this to leave an inner power plane unperforated. Expect far "
+            "fewer vias, since such a plane often covers most of the board."
+        ))
 
-        self.avoid_footprints = wx.CheckBox(self, label="Avoid footprints")
+        self.avoid_footprints = wx.CheckBox(self, label=_("Avoid footprints"))
         self.avoid_footprints.SetValue(bool(saved.get("avoid_footprints", DEFAULT_AVOID_FOOTPRINTS)))
-        self.avoid_footprints.SetToolTip(
+        self.avoid_footprints.SetToolTip(_(
             "Keep vias out from under every component's bounding box.\n\n"
-            "Off by default: a thermal via array under a QFN/BGA ground pad "
+            "This is about mechanical fit, not clearance, so it applies "
+            "whatever net the footprint is on.\n\n"
+            "Off by default: a thermal via array under a QFN or BGA ground pad "
             "is a normal use of via stitching, and this would block it."
-        )
+        ))
 
-        self.avoid_same_net_pads = wx.CheckBox(self, label="Avoid pads already on this net")
+        self.avoid_same_net_pads = wx.CheckBox(self, label=_("Avoid pads already on this net"))
         self.avoid_same_net_pads.SetValue(bool(saved.get("avoid_same_net_pads", DEFAULT_AVOID_SAME_NET_PADS)))
-        self.avoid_same_net_pads.SetToolTip(
-            "Keep vias off the copper of pads already on the net being "
-            "stitched.\n\nOff by default: via-in-pad on a thermal array is a "
-            "normal use of stitching, and this would block it."
-        )
+        self.avoid_same_net_pads.SetToolTip(_(
+            "Keep vias off the copper of pads that are already on the net being "
+            "stitched.\n\n"
+            "Off by default: dropping a via array straight onto a QFN or BGA "
+            "thermal pad is a normal use of stitching, and this would block it.\n\n"
+            "Tick this to leave same-net pads alone, for example to keep vias out "
+            "of a paste-critical pad. Pads on every other net are avoided either "
+            "way, with their full clearance."
+        ))
 
         # --- Net ---
         self.net = wx.ComboBox(self, choices=net_names, style=wx.CB_DROPDOWN)
@@ -593,7 +653,7 @@ class ViaStitchingDialogLegacy(wx.Dialog):
         # leave ghost vias in the view -- so the plugin removes the vias it
         # grouped itself. Top of the dialog rather than its own toolbar
         # button: it belongs with the run it undoes.
-        self.remove_run_btn = wx.Button(self, label="Reset last run")
+        self.remove_run_btn = wx.Button(self, label=_("Reset last run"))
         self.remove_run_btn.Bind(wx.EVT_BUTTON, lambda evt: self._on_remove_last_run())
         self.remove_run_label = wx.StaticText(self, label="")
         top_row = wx.BoxSizer(wx.HORIZONTAL)
@@ -603,15 +663,15 @@ class ViaStitchingDialogLegacy(wx.Dialog):
         self._refresh_remove_run_btn()
 
         self._make_group(self.main_sizer, [
-            ("Net Name:", self.net),
+            (_("Net Name:"), self.net),
         ])
 
         self._make_group(self.main_sizer, [
-            ("Via Type:", self.via_type),
-            ("Start Layer:", self.start_layer),
-            ("End Layer:", self.end_layer),
-            ("Via Diameter (mm):", self.via_dia),
-            ("Drill (mm):", self.drill),
+            (_("Via Type:"), self.via_type),
+            (_("Start Layer:"), self.start_layer),
+            (_("End Layer:"), self.end_layer),
+            (_("Via Diameter (mm):"), self.via_dia),
+            (_("Drill (mm):"), self.drill),
         ])
 
         self.advisory_label = wx.StaticText(self, label="")
@@ -620,18 +680,18 @@ class ViaStitchingDialogLegacy(wx.Dialog):
         self.main_sizer.Add(self.advisory_label, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.TOP, 8)
 
         self._make_group(self.main_sizer, [
-            ("Via Pattern:", self.pattern),
-            ("Spacing (mm):", self.spacing),
-            ("X-Offset (mm):", self.x_offset),
-            ("Y-Offset (mm):", self.y_offset),
-            ("Zones:", self.avoid_zones),
-            ("Footprints:", self.avoid_footprints),
-            ("Same-net pads:", self.avoid_same_net_pads),
+            (_("Via Pattern:"), self.pattern),
+            (_("Spacing (mm):"), self.spacing),
+            (_("X-Offset (mm):"), self.x_offset),
+            (_("Y-Offset (mm):"), self.y_offset),
+            (_("Zones:"), self.avoid_zones),
+            (_("Footprints:"), self.avoid_footprints),
+            (_("Same-net pads:"), self.avoid_same_net_pads),
         ])
 
         buttons = self.CreateButtonSizer(wx.OK | wx.CANCEL)
-        self.reset_btn = wx.Button(self, label="Reset settings")
-        self.reset_btn.SetToolTip("Restore the built-in defaults and clear the settings saved from previous runs.")
+        self.reset_btn = wx.Button(self, label=_("Reset settings"))
+        self.reset_btn.SetToolTip(_("Restore the built-in defaults and clear the settings saved from previous runs."))
         self.reset_btn.Bind(wx.EVT_BUTTON, lambda evt: self._on_reset())
 
         button_row = wx.BoxSizer(wx.HORIZONTAL)
@@ -758,13 +818,19 @@ class ViaStitchingDialogLegacy(wx.Dialog):
         if runs:
             group, vias = runs[-1]
             run = group.GetName()[len(GROUP_PREFIX):] or group.GetName()
-            self.remove_run_label.SetLabel(f"{run}, {len(vias)} vias")
-            self.remove_run_btn.SetToolTip(f"Delete the {len(vias)} vias placed by '{run}'.")
-        else:
-            self.remove_run_label.SetLabel("No stitching run on this board")
+            self.remove_run_label.SetLabel(
+                _("{run}, {count} vias").format(run=run, count=len(vias))
+            )
             self.remove_run_btn.SetToolTip(
-                "Only vias placed by this plugin, and still grouped, can be "
-                "removed this way."
+                _("Delete the {count} vias placed by '{run}'.").format(
+                    count=len(vias), run=run
+                )
+            )
+        else:
+            self.remove_run_label.SetLabel(_("No stitching run on this board"))
+            self.remove_run_btn.SetToolTip(
+                _("Only vias placed by this plugin, and still grouped, can be "
+                "removed this way.")
             )
         self.remove_run_label.SetForegroundColour(
             wx.SystemSettings.GetColour(wx.SYS_COLOUR_GRAYTEXT if not runs else wx.SYS_COLOUR_WINDOWTEXT)
@@ -778,14 +844,20 @@ class ViaStitchingDialogLegacy(wx.Dialog):
             return
         group, vias = runs[-1]
         confirm = wx.MessageBox(
-            f"Remove the {len(vias)} vias placed by '{group.GetName()}'?",
-            "Reset last run", wx.YES_NO | wx.ICON_WARNING, self,
+            _("Remove the {count} vias placed by '{run}'?").format(
+                count=len(vias), run=group.GetName()
+            ),
+            _("Reset last run"), wx.YES_NO | wx.ICON_WARNING, self,
         )
         if confirm != wx.YES:
             return
-        geo.delete_grouped_vias(self.board, group, vias)
-        _refill_zones(self.board, self)
-        pcbnew.Refresh()
+        try:
+            geo.delete_grouped_vias(self.board, group, vias)
+            _refill_zones(self.board, self)
+            pcbnew.Refresh()
+        except Exception:
+            _report(self, _("Removing the stitching run hit an unexpected error."),
+                    traceback.format_exc())
         self._refresh_remove_run_btn()
 
     def _on_reset(self):
@@ -814,11 +886,13 @@ class ViaStitchingDialogLegacy(wx.Dialog):
         start_name = self._combo_layer_name(self.start_layer)
         end_name = self._combo_layer_name(self.end_layer)
         if start_name not in self.layer_map or end_name not in self.layer_map:
-            raise ValueError("Pick a start and end layer.")
+            raise ValueError(_("Pick a start and end layer."))
         start_layer = self.layer_map[start_name]
         end_layer = self.layer_map[end_name]
         if start_layer == end_layer:
-            raise ValueError(f"Start and end layers must not be the same ({start_name}).")
+            raise ValueError(
+                _("Start and end layers must not be the same ({layer})").format(layer=start_name)
+            )
 
         try:
             via_dia_mm = float(self.via_dia.GetValue())
@@ -827,24 +901,27 @@ class ViaStitchingDialogLegacy(wx.Dialog):
             x_offset_mm = float(self.x_offset.GetValue() or 0)
             y_offset_mm = float(self.y_offset.GetValue() or 0)
         except ValueError:
-            raise ValueError("Via diameter, drill, spacing and offsets must be numbers (mm).")
+            raise ValueError(_("Via diameter, drill and spacing and offsets must be numbers (mm)."))
 
         if not all(math.isfinite(v) for v in (via_dia_mm, drill_mm, spacing_mm)):
-            raise ValueError("Via diameter, drill and spacing must be real numbers (mm).")
+            raise ValueError(_("Via diameter, drill and spacing must be real numbers (mm)."))
 
         # Ported from the IPC dialog's values() -- missing here until now,
         # so a zero/negative size or drill >= diameter reached stitch()
         # unvalidated instead of failing with a clear message in the dialog.
         if min(via_dia_mm, drill_mm, spacing_mm) <= 0:
-            raise ValueError("Via diameter, drill and spacing must all be greater than zero.")
+            raise ValueError(_("Via diameter, drill and spacing must all be greater than zero."))
         if drill_mm >= via_dia_mm:
             raise ValueError(
-                f"The drill ({drill_mm} mm) must be smaller than the via diameter ({via_dia_mm} mm)."
+                _(
+                    "The drill ({drill} mm) must be smaller than the via diameter "
+                    "({dia} mm)."
+                ).format(drill=drill_mm, dia=via_dia_mm)
             )
 
         net_name = self.net.GetValue().strip()
         if not net_name:
-            raise ValueError("Pick a net to stitch.")
+            raise ValueError(_("Pick a net to stitch."))
 
         return dict(
             via_type=via_type, start_layer=start_layer, end_layer=end_layer, net_name=net_name,

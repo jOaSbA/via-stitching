@@ -192,6 +192,67 @@ def test_kicad_config_readers_do_not_raise():
         assert len(rgb) == 3 and all(0 <= c <= 255 for c in rgb)
 
 
+def test_translation_catalogs_cover_every_wrapped_string():
+    """Every _() call's literal has to exist in all three catalogs, or a user
+    running KiCad in Dutch sees a half-translated dialog. The catalogs are
+    shared with the IPC build, so this also catches wording drifting apart
+    between the two backends."""
+    import ast
+    import json
+
+    import _i18n_legacy
+
+    plugin_source = os.path.join(
+        os.path.dirname(_i18n_legacy.__file__), "via_stitching_action_legacy.py"
+    )
+    with open(plugin_source, encoding="utf-8") as fh:
+        source = fh.read()
+    wrapped = [
+        node.args[0].value
+        for node in ast.walk(ast.parse(source))
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "_"
+        and node.args and isinstance(node.args[0], ast.Constant)
+    ]
+    assert len(wrapped) > 40, "expected the dialog and messages to be wrapped"
+
+    for code in ("nl", "de", "fr"):
+        catalog = _i18n_legacy._catalog(code)
+        assert catalog, "no {} catalog found".format(code)
+        missing = sorted(set(text for text in wrapped if text not in catalog))
+        assert not missing, "{}: {} strings missing: {}".format(code, len(missing), missing[:3])
+
+
+def test_translation_falls_back_to_the_source_text():
+    import _i18n_legacy
+
+    original = _i18n_legacy._active_catalog
+    try:
+        _i18n_legacy._active_catalog = {"Via Stitching": "Via Stikken"}
+        assert _i18n_legacy._("Via Stitching") == "Via Stikken"
+        # Anything the catalog does not carry comes back unchanged, which is
+        # what makes English work without a catalog of its own.
+        assert _i18n_legacy._("not in any catalog") == "not in any catalog"
+    finally:
+        _i18n_legacy._active_catalog = original
+
+
+def test_error_dialog_carries_the_traceback():
+    """The point of the dialog over a message box is that the text can be
+    selected and copied into a bug report, so the traceback has to be in a
+    text control rather than a label."""
+    details = chr(10).join(["Traceback (most recent call last):",
+                            "  File nowhere, line 1", "Boom: it broke"])
+    dlg = vsl.ErrorDialog(None, "Via Stitching hit an unexpected error.", details)
+    try:
+        texts = [c for c in dlg.GetChildren() if isinstance(c, wx.TextCtrl)]
+        assert len(texts) == 1, texts
+        assert texts[0].GetValue() == details
+        assert not texts[0].IsEditable(), "read-only, but still selectable"
+        assert dlg.GetTitle()
+    finally:
+        dlg.Destroy()
+
+
 def run():
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     for test in tests:

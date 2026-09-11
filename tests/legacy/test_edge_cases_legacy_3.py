@@ -257,12 +257,16 @@ def test_run_does_nothing_on_cancel():
 def test_run_surfaces_an_unexpected_exception_without_crashing_kicad():
     """Anything that isn't RuntimeError/ValueError (a real bug, in other
     words) must still be caught and shown, not propagate out of Run() and
-    potentially destabilize the host KiCad process."""
+    potentially destabilize the host KiCad process.
+
+    _report is stubbed rather than wx.MessageBox: an unexpected error now
+    opens a real ErrorDialog, and showing it modally puts an actual window
+    on the desktop that blocks the run until someone clicks OK."""
     board, net = _board(layers=2)
     orig_get_board = pcbnew.GetBoard
     orig_show_modal = vsl.ViaStitchingDialogLegacy.ShowModal
     orig_values = vsl.ViaStitchingDialogLegacy.values
-    orig_msgbox = wx.MessageBox
+    orig_report = vsl._report
     shown = []
     try:
         pcbnew.GetBoard = lambda: board
@@ -272,17 +276,21 @@ def test_run_surfaces_an_unexpected_exception_without_crashing_kicad():
 
         vsl.ViaStitchingDialogLegacy.ShowModal = lambda self: wx.ID_OK
         vsl.ViaStitchingDialogLegacy.values = _raise_type_error
-        wx.MessageBox = lambda text, *a, **k: shown.append(text) or wx.OK
+        vsl._report = lambda parent, summary, details: shown.append((summary, details))
 
         plugin = vsl.ViaStitchingLegacy()
         plugin.Run()  # must not raise out of this call
 
-        assert shown and "unexpected error" in shown[0].lower()
+        assert shown, "the failure was swallowed"
+        summary, details = shown[0]
+        assert "unexpected error" in summary.lower()
+        # The traceback has to reach the dialog, or there is nothing to report.
+        assert "something genuinely unexpected" in details and "Traceback" in details
     finally:
         pcbnew.GetBoard = orig_get_board
         vsl.ViaStitchingDialogLegacy.ShowModal = orig_show_modal
         vsl.ViaStitchingDialogLegacy.values = orig_values
-        wx.MessageBox = orig_msgbox
+        vsl._report = orig_report
 
 
 # ---- full-pipeline netclass integration ------------------------------------

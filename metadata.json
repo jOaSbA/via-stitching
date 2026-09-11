@@ -91,9 +91,9 @@
       "kicad_version_max": "9.0",
       "runtime": "swig",
       "download_url": "https://github.com/jOaSbA/via-stitching/releases/download/v0.1.0-legacy/via-stitching-legacy-0.1.0.zip",
-      "download_sha256": "cc86c9381f1c4710352160cba14c3c1fa611c1d907b802d72e39caf9f5cf6c55",
-      "download_size": 26154,
-      "install_size": 64867
+      "download_sha256": "692e7af608b4460a16cea75c7a9faf76c20a02574d22571ee1c066a96ed928ba",
+      "download_size": 42200,
+      "install_size": 107803
     }
   ]
 }

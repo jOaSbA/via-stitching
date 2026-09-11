@@ -7,6 +7,7 @@
 #
 # License: GPL-3.0-or-later
 
+import json
 import os
 import sys
 
@@ -33,3 +34,18 @@ def kicad_config_dirs():
     except Exception:
         return []
     return [os.path.join(root, name) for name in versions]
+
+
+def ui_language():
+    """KiCad's configured UI language, as its own display-name string (e.g.
+    "English", "Dutch"), or None if we cannot tell. Same source as the IPC
+    build reads, so both backends follow the same setting."""
+    try:
+        for config_dir in kicad_config_dirs():
+            path = os.path.join(config_dir, "kicad_common.json")
+            if os.path.exists(path):
+                with open(path, encoding="utf-8") as fh:
+                    return json.load(fh).get("system", {}).get("language")
+    except Exception:
+        pass
+    return None

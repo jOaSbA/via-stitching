@@ -164,7 +164,12 @@ def test_reset_last_run_removes_the_newest_run_only():
 
     dlg = vsl.ViaStitchingDialogLegacy(None, board)
     original_msgbox = wx.MessageBox
+    # _report opens a real, modal ErrorDialog. If the removal ever throws, an
+    # unstubbed one would sit on the desktop waiting for a human to click OK.
+    original_report = vsl._report
+    reported = []
     try:
+        vsl._report = lambda parent, summary, details: reported.append(summary)
         wx.MessageBox = lambda *a, **k: wx.NO
         dlg._on_remove_last_run()
         assert len(_vias(board)) == placed + 1, "answering No must remove nothing"
@@ -182,7 +187,9 @@ def test_reset_last_run_removes_the_newest_run_only():
         assert dlg.remove_run_label.GetLabel() == "No stitching run on this board"
     finally:
         wx.MessageBox = original_msgbox
+        vsl._report = original_report
         dlg.Destroy()
+    assert not reported, reported
 
 
 def run():
