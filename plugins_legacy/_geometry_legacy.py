@@ -3,7 +3,7 @@
 # Mirrors via_stitching_action.py's geometry functions one for one, using
 # pcbnew's SWIG bindings instead of kipy/IPC. Every function here was
 # verified against a real KiCad 6.0 board (not just against fakes) during
-# development -- see via-stitching/spikes/legacy_swig/ for the individual
+# development -- see via-stitching/tests/legacy/ for the individual
 # spike files that established each piece, including the real API traps
 # found along the way (constructor shapes, setter ordering, broken
 # accessors). This module is the consolidated, production version of that
