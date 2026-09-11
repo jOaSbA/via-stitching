@@ -304,6 +304,8 @@ def test_full_pipeline_respects_higher_netclass_clearance():
     around, not a plugin bug to fix."""
     import subprocess
 
+    diagnostics = []
+
     def gap_for(vcc_clearance_nm):
         out = subprocess.run(
             [sys.executable, __file__.rsplit("test_", 1)[0] + "_netclass_gap_check.py",
@@ -313,6 +315,7 @@ def test_full_pipeline_respects_higher_netclass_clearance():
         assert out.returncode == 0, (
             "the gap check subprocess failed: " + out.stdout + out.stderr
         )
+        diagnostics.append(out.stderr.strip())
         return out.stdout.strip()
 
     gap_tight = gap_for(100_000)    # 0.1mm clearance
@@ -324,7 +327,10 @@ def test_full_pipeline_respects_higher_netclass_clearance():
         print("    (skipped: this build cannot construct a netclass)")
         return
     gap_tight, gap_loose = int(gap_tight), int(gap_loose)
-    assert gap_loose > gap_tight, "a higher netclass clearance should push vias further from the track"
+    assert gap_loose > gap_tight, (
+        "a higher netclass clearance should push vias further from the track. "
+        + " | ".join(diagnostics)
+    )
 
 
 # ---- structural edge cases --------------------------------------------------

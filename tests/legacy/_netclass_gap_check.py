@@ -91,6 +91,14 @@ def main(vcc_clearance_nm):
                via_dia_mm=0.4, drill_mm=0.2, spacing_mm=0.5, pattern="Square",
                x_offset_mm=0, y_offset_mm=0)
 
+    # What the plugin's own resolver made of the netclass we just built. On a
+    # build where the clearance never reaches net_clearances, the gap comes out
+    # the same for every value and the caller needs to see why.
+    clearances = geo.net_clearances(board, "GND")
+    print(f"VCC clearance resolved to {clearances['VCC']} nm "
+          f"(asked for {vcc_clearance_nm}), netclass name {vcc.GetNetClassName()}",
+          file=sys.stderr)
+
     gap = min(
         abs(v.GetPosition().x - 5 * MM)
         for v in board.GetTracks()
