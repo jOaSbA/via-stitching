@@ -19,14 +19,25 @@ jobs:
         id: version
         run: |
           set -euo pipefail
-          version="${GITHUB_REF_NAME#v}"
-          metadata_version="$(jq -r '.versions[-1].version' metadata.json)"
+          # A -legacy suffix picks the SWIG build for KiCad 6, 7 and 8. Both
+          # runtimes are one package, so each tag has to say which one it is.
+          ref="${GITHUB_REF_NAME#v}"
+          if [[ "${ref}" == *-legacy ]]; then
+            runtime="swig"; version="${ref%-legacy}"
+            archive="via-stitching-legacy-${version}.zip"; flag="--legacy"
+          else
+            runtime="ipc"; version="${ref}"
+            archive="via-stitching-${version}.zip"; flag=""
+          fi
+          metadata_version="$(jq -r --arg r "${runtime}" \
+            '[.versions[] | select((.runtime // "swig") == $r)] | last | .version' metadata.json)"
           if [[ "${version}" != "${metadata_version}" ]]; then
-            echo "Tag ${GITHUB_REF_NAME} does not match metadata.json's latest version ${metadata_version}." >&2
+            echo "Tag ${GITHUB_REF_NAME} does not match metadata.json's newest ${runtime} version ${metadata_version}." >&2
             exit 1
           fi
           echo "version=${version}" >> "${GITHUB_OUTPUT}"
-          echo "archive=via-stitching-${version}.zip" >> "${GITHUB_OUTPUT}"
+          echo "archive=${archive}" >> "${GITHUB_OUTPUT}"
+          echo "flag=${flag}" >> "${GITHUB_OUTPUT}"
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -49,7 +60,7 @@ jobs:
           for t in tests/ipc/test_*.py; do echo "== $t"; xvfb-run -a python "$t"; done
 
       - name: Build PCM package
-        run: python3 build.py
+        run: python3 build.py ${{ steps.version.outputs.flag }}
 
       - name: Verify metadata.json is up to date
         run: |
@@ -65,5 +76,5 @@ jobs:
           gh release create "${GITHUB_REF_NAME}" \
             "dist/${{ steps.version.outputs.archive }}" \
             --verify-tag \
-            --title "Via Stitching ${{ steps.version.outputs.version }}" \
+            --title "Via Stitching ${{ github.ref_name }}" \
             --generate-notes
