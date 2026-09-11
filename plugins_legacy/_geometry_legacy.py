@@ -141,15 +141,18 @@ def polyset_to_shapely_polygons(polyset):
 
 
 def copper_layer_order(board):
-    """Enabled copper layers, physically ordered front to back.
+    """Enabled copper layers, front to back in physical stackup order.
 
-    Layer IDs 0..31 are copper; KiCad numbers inner layers in physical
-    stackup order between F_Cu(0) and B_Cu(31), so filtering to enabled
-    copper layers while keeping ascending numeric order is sufficient --
-    confirmed on a real 4-layer board (F_Cu, In1_Cu, In2_Cu, B_Cu)."""
-    import pcbnew
+    Ascending layer id is NOT stackup order. It happened to be on KiCad 6, 7
+    and 8, where copper was F_Cu=0, In1..In30=1..30, B_Cu=31. KiCad 9
+    renumbered it: F_Cu=0, B_Cu=2, In1_Cu=4, In2_Cu=6, and so on upward. Sorting
+    those numerically puts B_Cu above every inner layer, which silently
+    corrupts every span computed from this list, and a range(32) scan would
+    also miss In8_Cu and beyond entirely.
 
-    return [l for l in range(32) if pcbnew.IsCopperLayer(l) and board.IsLayerEnabled(l)]
+    LSET's own CuStack() answers in real stackup order and exists on every
+    version checked (6.0, 7.0, 8.0, 9.0, 10.0)."""
+    return list(board.GetEnabledLayers().CuStack())
 
 
 def span_layers(board, start_layer, end_layer):

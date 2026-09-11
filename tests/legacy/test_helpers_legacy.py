@@ -32,6 +32,25 @@ MM = 1_000_000
 BOX = (0, 0, 10 * MM, 10 * MM)
 
 
+def test_copper_layer_order_is_stackup_order_not_id_order():
+    """KiCad 9 renumbered copper: B_Cu became 2 and the inner layers start at
+    4, so ordering by layer id puts the back layer above every inner one. Every
+    via span, the outer-layer test behind the advisory, and the dialog's own
+    layer list are all built from this order, so getting it wrong silently
+    stitches the wrong layers rather than failing."""
+    board = pcbnew.BOARD()
+    board.SetCopperLayerCount(4)
+    order = geo.copper_layer_order(board)
+    names = [board.GetLayerName(l) for l in order]
+    assert names == ["F.Cu", "In1.Cu", "In2.Cu", "B.Cu"], names
+
+    outer_span = [board.GetLayerName(l) for l in geo.span_layers(board, order[0], order[-1])]
+    assert outer_span == names, outer_span
+    # A span stopping at an inner layer must not swallow the back layer.
+    inner_span = [board.GetLayerName(l) for l in geo.span_layers(board, order[0], order[1])]
+    assert inner_span == ["F.Cu", "In1.Cu"], inner_span
+
+
 def test_square_grid():
     pts = list(vsl._grid_points(BOX, 2 * MM, "Square"))
     assert len(pts) == 36, len(pts)  # 6 x 6, both edges included

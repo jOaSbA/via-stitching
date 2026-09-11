@@ -24,9 +24,12 @@ def rectangle():
 
 
 def layer_set(*layers):
-    """An LSET holding these layers. KiCad 9 stopped taking a bare
-    PCB_LAYER_ID here and wants a sequence instead."""
-    try:
-        return pcbnew.LSET(*layers)
-    except TypeError:
-        return pcbnew.LSET(list(layers))
+    """An LSET holding these layers.
+
+    LSET(layer) builds one on KiCad 6 to 8 and raises on 9+, which wants a
+    vector of PCB_LAYER_ID that a Python list of ints does not satisfy either.
+    addLayer() is the one route that works on every version checked."""
+    result = pcbnew.LSET()
+    for layer in layers:
+        result.addLayer(layer)
+    return result
