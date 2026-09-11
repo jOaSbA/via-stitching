@@ -1,22 +1,29 @@
 # Via Stitching
 
-A KiCad 10 action plugin that fills the overlap of a net's copper zones (the top
+A KiCad action plugin that fills the overlap of a net's copper zones (the top
 and bottom GND pours, for example) with a grid of stitching vias. Through,
 micro, blind, and buried vias are all supported, spanning whichever two copper
 layers you pick.
 
-It's built on KiCad's IPC API (`kicad-python` / `kipy`) rather than the old SWIG
-`pcbnew` bindings, so it keeps working on KiCad 11 and later, where those
-bindings are gone.
+Works on KiCad 6, 7, 8, 9, 10, and later. One package, two builds: the Plugin
+and Content Manager hands your KiCad the one it can run, and both have the same
+dialog. See [Two builds](#two-builds) if you want to know which one you have.
 
-![The Via Stitching parameters dialog](docs/dialog.png?v=2)
+![The Via Stitching parameters dialog](docs/dialog.png?v=3)
 
 ## Requirements
 
-- KiCad 10.0 or newer, with the IPC API server enabled under
-  *Preferences > Plugins*.
-- `kicad-python`, `wxPython`, and `shapely`, which KiCad installs for you on first
-  run from `requirements.txt`.
+On KiCad 10 and later:
+
+- The IPC API server enabled under *Preferences > Plugins*.
+- `kicad-python`, `wxPython`, and `shapely`, which KiCad installs for you on
+  first run from `requirements.txt`.
+
+On KiCad 6 to 9:
+
+- `shapely`. KiCad ships wxPython itself but not shapely, so install it into
+  KiCad's own Python if the plugin reports it missing. On Windows that is
+  `"C:/Program Files/KiCad/<version>/bin/python.exe" -m pip install shapely`.
 
 ## Install
 
@@ -27,12 +34,15 @@ and restart the PCB editor.
 
 ### Manually
 
-1. Download the latest `via-stitching-x.y.z.zip` from the
-   [Releases](https://github.com/jOaSbA/via-stitching/releases) page.
+1. From the [Releases](https://github.com/jOaSbA/via-stitching/releases) page,
+   download `via-stitching-x.y.z.zip` on KiCad 10 or later, or
+   `via-stitching-swig-x.y.z.zip` on KiCad 6 to 9. Both are attached to the
+   same release.
 2. In the PCB editor: *Tools > Plugin and Content Manager > Install from File...*
-   and pick the zip. You can also just unzip the `plugins/` contents into
-   `Documents/KiCad/10.0/plugins/via_stitching/`.
-3. Enable the IPC API server, then *Tools > External Plugins > Refresh Plugins*.
+   and pick the zip. You can also unzip the `plugins/` contents into
+   `Documents/KiCad/<version>/3rdparty/plugins/via_stitching/`.
+3. On KiCad 10 and later, enable the IPC API server. Then
+   *Tools > External Plugins > Refresh Plugins*.
 
 ## Usage
 
@@ -70,16 +80,27 @@ and restart the PCB editor.
 
 The dialog remembers what you last set (via type, layers, size, pattern,
 offsets, net, and the avoid-* checkboxes) and pre-fills the next run with it,
-unless a via was selected on the board first. **Reset** clears that and puts
-the built-in defaults back.
+unless a via was selected on the board first. **Reset settings**, at the
+bottom, clears that and puts the built-in defaults back. **Reset last run**, at
+the top, is about the board rather than the dialog: see below.
 
-### Grouping
+### Grouping, and undoing a run
 
-All placed vias go into one group named `ViaStitching <net>`:
+All the vias from one run go into a group named after it, for example
+`ViaStitching GND F.Cu:B.Cu`. That makes a run one thing rather than four
+hundred:
 
-- To delete them all, click any via so the whole group selects, then `Delete`.
-- To delete one, right-click a via, choose *Grouping > Remove from Group*, then
-  delete it.
+- **Reset last run**, at the top of the dialog, deletes the newest run and
+  refills the zones. It names the run and its via count beside the button, asks
+  before deleting, and only ever touches vias this plugin placed and grouped.
+- Or click any via so the whole group selects, then `Delete`.
+- To delete one via, right-click it, choose *Grouping > Remove from Group*,
+  then delete it.
+
+On KiCad 10 and later `Ctrl+Z` also undoes a whole run, but only until the
+board is saved and reopened. Reset last run works at any point after that, and
+it is the only undo on KiCad 6 to 9, where a plugin cannot put anything on
+KiCad's undo stack at all.
 
 ## How clearance is handled
 
@@ -111,8 +132,7 @@ There's no clearance field, on purpose. Six things keep the vias legal:
   doesn't block positions a back-side pass needs.
 - **Clearance values** come from the board's netclasses, taking the larger of the
   two nets involved the way KiCad's own rules do. A netclass that just inherits
-  the board minimum reports no value over the IPC API, and those fall back to
-  0.2 mm.
+  the board minimum reports no value of its own, and those fall back to 0.2 mm.
 
 The **Avoid other nets' zones** checkbox is off by default, because a via through
 another net's zone is not a DRC error: KiCad pulls the fill back around it during
@@ -143,14 +163,49 @@ The dialog follows whatever language KiCad itself is configured to show
 - French
 
 Anything without a catalog falls back to English. Catalogs live in
-`plugins/locale/` alongside the English source strings. The three shipped
-translations are machine-drafted and flagged as such in their files.
+`plugins/locale/`, keyed by the English source strings, and are shared by both
+builds.
 
-## Building the package
+## Two builds
 
-Run `python build.py`. It produces `dist/via-stitching-<version>.zip` in the
-layout the Plugin and Content Manager expects and writes the archive's SHA-256
-and sizes into `metadata.json`.
+KiCad has two plugin APIs, and this plugin ships one build for each:
+
+| KiCad | Build | Sources | Version numbers |
+| --- | --- | --- | --- |
+| 10 and later | IPC (`kicad-python` / `kipy`) | `plugins/` | 2.x |
+| 6, 7, 8, 9 | SWIG (`pcbnew` bindings) | `plugins_legacy/` | 1.x |
+
+KiCad is retiring the SWIG bindings. KiCad 10 has already dropped parts of
+them, including the via type constants this plugin needs, and KiCad 11 removes
+them altogether, so the IPC build takes over from 10 onward. Below that, KiCad
+6, 7 and 8 have no API server for it to talk to, and KiCad 9's is missing the
+call it uses to check that the board kept the vias it was given.
+
+The two APIs differ down to how copper layers are numbered, so each build is
+its own implementation of the same dialog. Both are tested against the KiCad
+versions they claim, the SWIG build on real KiCad 6, 7, 8 and 9 in CI.
+
+Version numbers stay on separate tracks, the SWIG one always lower, so that
+upgrading from KiCad 9 to 10 arrives as an ordinary package update.
+
+## Building the packages
+
+- `python build.py` produces `dist/via-stitching-<version>.zip`, the IPC build.
+- `python build.py --legacy` produces `dist/via-stitching-swig-<version>.zip`,
+  the SWIG build.
+
+Both are laid out the way the Plugin and Content Manager expects, and each
+writes its own archive's SHA-256 and sizes into `metadata.json`. One tag builds
+and publishes both, and `tools/check_release.py` refuses the tag if the tag and
+`metadata.json` disagree.
+
+Tests live in `tests/ipc/` and `tests/legacy/`. The IPC suites run offline
+against a fake board; the SWIG suites need a real `pcbnew`, so run those with
+KiCad's own interpreter:
+
+```
+"C:/Program Files/KiCad/6.0/bin/python.exe" tests/legacy/test_helpers_legacy.py
+```
 
 ## License
 
