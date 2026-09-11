@@ -39,7 +39,7 @@ from _win_dialog import make_tool_window  # noqa: E402
 from _kicad_config import kicad_config_dirs  # noqa: E402
 from _i18n import _  # noqa: E402
 
-VERSION = "2.1.0"
+VERSION = "2.2.0"
 
 # shapely (plus the numpy and GEOS it drags in) costs the better part of a second
 # to import, more than the rest of start-up together, so the geometry functions
@@ -50,6 +50,11 @@ VERSION = "2.1.0"
 API_TIMEOUT_MS = 30000
 
 DEFAULT_NET = "GND"
+
+# Every group this plugin makes is named "<prefix><net> <start>:<end>".
+# "Reset last run" finds its own work by that prefix, so nothing else on
+# the board can be swept up by it.
+GROUP_PREFIX = "ViaStitching "
 
 # Default via settings
 DEFAULT_VIA_DIAMETER_MM = 0.6
@@ -735,12 +740,35 @@ def _group_vias(board, vias, net_name, start_layer, end_layer):
         return False
     try:
         group = Group()
+        span = f"{board.get_layer_name(start_layer)}:{board.get_layer_name(end_layer)}"
         # Group.name is read-only in kicad-python 0.7.x, the inherited proto is not.
-        group.proto.name = f"ViaStitching {net_name} {start_layer}:{end_layer}"
+        group.proto.name = f"{GROUP_PREFIX}{net_name} {span}"
         group.items = vias  # stores the member KIIDs, so the vias must exist already
         return bool(board.create_items(group))
     except Exception:
         return False
+
+
+def stitching_runs(board):
+    """Every stitching run still on the board, as (group, its vias).
+
+    Deliberately not board.get_groups(): that unwraps the members of every
+    group on the board in one call, so one unrelated group with a dangling
+    member makes KiCad refuse the lot. Asking per group costs a round trip
+    each and loses only the broken group.
+    """
+    runs = []
+    for group in board.get_items(KiCadObjectType.KOT_PCB_GROUP):
+        if not group.proto.name.startswith(GROUP_PREFIX):
+            continue
+        try:
+            members = board.get_items_by_id(list(group.proto.items))
+        except ApiError:
+            continue
+        vias = [m for m in members if isinstance(m, Via)]
+        if vias:  # a run whose vias are already gone is nothing to remove
+            runs.append((group, vias))
+    return runs
 
 
 def stitch(
@@ -1152,6 +1180,18 @@ class ViaStitchingDialog(wx.Dialog):
 
         self.main_sizer = wx.BoxSizer(wx.VERTICAL)
 
+        # Ctrl+Z does undo a run here, unlike on the SWIG build, but only until
+        # the board is saved and reopened. This removes a run by its group at
+        # any point after that, and keeps the dialog identical on both builds.
+        self.remove_run_btn = wx.Button(self, label=_("Reset last run"))
+        self.remove_run_btn.Bind(wx.EVT_BUTTON, lambda evt: self._on_remove_last_run())
+        self.remove_run_label = wx.StaticText(self, label="")
+        top_row = wx.BoxSizer(wx.HORIZONTAL)
+        top_row.Add(self.remove_run_btn, 0, wx.ALIGN_CENTER_VERTICAL)
+        top_row.Add(self.remove_run_label, 1, wx.ALIGN_CENTER_VERTICAL | wx.LEFT, 8)
+        self.main_sizer.Add(top_row, 0, wx.EXPAND | wx.ALL, 5)
+        self._refresh_remove_run_btn()
+
         self._make_group(self.main_sizer, [
             (_("Net Name:"), self.net)
         ])
@@ -1187,7 +1227,7 @@ class ViaStitchingDialog(wx.Dialog):
         # a fixed left-to-right order that only matches some platforms.
         buttons = self.CreateButtonSizer(wx.OK | wx.CANCEL)
 
-        self.reset_btn = wx.Button(self, label=_("Reset"))
+        self.reset_btn = wx.Button(self, label=_("Reset settings"))
         self.reset_btn.SetToolTip(_(
             "Restore the built-in defaults and clear the settings saved from "
             "previous runs."
@@ -1282,6 +1322,64 @@ class ViaStitchingDialog(wx.Dialog):
             self.advisory_label.Hide()
         self.main_sizer.Layout()
         self.Fit()
+
+    def _refresh_remove_run_btn(self):
+        try:
+            runs = stitching_runs(self.board)
+        except Exception:
+            runs = []  # a board read must never stop the dialog from opening
+        self.remove_run_btn.Enable(bool(runs))
+        if runs:
+            group, vias = runs[-1]
+            run = group.proto.name[len(GROUP_PREFIX):] or group.proto.name
+            self.remove_run_label.SetLabel(
+                _("{run}, {count} vias").format(run=run, count=len(vias))
+            )
+            self.remove_run_btn.SetToolTip(
+                _("Delete the {count} vias placed by '{run}'.").format(
+                    count=len(vias), run=run
+                )
+            )
+        else:
+            self.remove_run_label.SetLabel(_("No stitching run on this board"))
+            self.remove_run_btn.SetToolTip(
+                _("Only vias placed by this plugin, and still grouped, can be "
+                  "removed this way.")
+            )
+        self.remove_run_label.SetForegroundColour(
+            wx.SystemSettings.GetColour(
+                wx.SYS_COLOUR_GRAYTEXT if not runs else wx.SYS_COLOUR_WINDOWTEXT
+            )
+        )
+        self.Layout()
+
+    def _on_remove_last_run(self):
+        try:
+            runs = stitching_runs(self.board)
+        except Exception as exc:
+            _report(self, _("Removing the stitching run hit an unexpected error."), exc)
+            return
+        if not runs:
+            self._refresh_remove_run_btn()
+            return
+        group, vias = runs[-1]
+        confirm = wx.MessageBox(
+            _("Remove the {count} vias placed by '{run}'?").format(
+                count=len(vias), run=group.proto.name
+            ),
+            _("Reset last run"),
+            wx.YES_NO | wx.ICON_WARNING | wx.STAY_ON_TOP, self,
+        )
+        if confirm != wx.YES:
+            return
+        try:
+            # The group goes with its vias: emptying it leaves a stray group
+            # behind in the board tree.
+            self.board.remove_items(list(vias) + [group])
+            self.board.refill_zones(block=False)
+        except Exception as exc:
+            _report(self, _("Removing the stitching run hit an unexpected error."), exc)
+        self._refresh_remove_run_btn()
 
     def _on_reset(self):
         """Restore the hardcoded defaults and clear whatever was saved from a

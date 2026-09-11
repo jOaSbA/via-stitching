@@ -175,12 +175,10 @@ def test_the_run_is_grouped_under_one_readable_name():
     assert grouped
     groups = [i for i in board.placed if hasattr(i, "proto") and not hasattr(i, "padstack")]
     assert len(groups) == 1, groups
-    # Raw BoardLayer enum values, not layer names: this is what KiCad shows in
-    # its group list today. The legacy backend names the same group
-    # "ViaStitching GND F.Cu:B.Cu", so the two are worth reconciling.
-    assert groups[0].proto.name == (
-        f"ViaStitching GND {BoardLayer.BL_F_Cu}:{BoardLayer.BL_B_Cu}"
-    )
+    # Layer names, not the raw BoardLayer enum values this used to use: the
+    # name is what "Reset last run" puts in front of the user, and the SWIG
+    # backend names the same group the same way.
+    assert groups[0].proto.name == "ViaStitching GND F.Cu:B.Cu"
     assert len(groups[0].items) == count
 
 
