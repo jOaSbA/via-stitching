@@ -10,6 +10,7 @@
 
 import os
 import sys
+import time
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "plugins"))
 
@@ -17,8 +18,24 @@ from kipy import KiCad  # noqa: E402
 from kipy.board_types import BoardLayer, ViaType  # noqa: E402
 
 
+def wait_until_ready(timeout_s=120):
+    """KiCad answers on the socket well before it will answer questions: it
+    replies "KiCad is not ready" while it is still opening the board. Poll
+    until it actually hands over a board."""
+    deadline = time.time() + timeout_s
+    last = None
+    while time.time() < deadline:
+        try:
+            kicad = KiCad()
+            return kicad, kicad.get_board()
+        except Exception as exc:
+            last = exc
+            time.sleep(2)
+    raise SystemExit("KiCad never became ready in {}s: {!r}".format(timeout_s, last))
+
+
 def main():
-    kicad = KiCad()
+    kicad, board = wait_until_ready()
     print("kicad      " + str(kicad.get_version()))
     print("kipy built against " + str(kicad.get_api_version()))
     try:
@@ -29,7 +46,6 @@ def main():
         # gets here silently. That is exactly the case worth reporting.
         print("handshake  {}: {}".format(type(exc).__name__, exc))
 
-    board = kicad.get_board()
     nets = sorted({n.name for n in board.get_nets() if n.name})
     print("board      open, nets: " + ", ".join(nets))
 
