@@ -1,3 +1,9 @@
+# One tag, one release, both builds.
+#
+# The IPC package and the SWIG package are one PCM package with two runtimes,
+# so they ship together: the tag names the IPC version, the release carries
+# both archives, and metadata.json points both download_urls at it.
+
 name: Release
 
 on:
@@ -18,26 +24,7 @@ jobs:
       - name: Validate tag against metadata.json
         id: version
         run: |
-          set -euo pipefail
-          # A -legacy suffix picks the SWIG build for KiCad 6, 7 and 8. Both
-          # runtimes are one package, so each tag has to say which one it is.
-          ref="${GITHUB_REF_NAME#v}"
-          if [[ "${ref}" == *-legacy ]]; then
-            runtime="swig"; version="${ref%-legacy}"
-            archive="via-stitching-legacy-${version}.zip"; flag="--legacy"
-          else
-            runtime="ipc"; version="${ref}"
-            archive="via-stitching-${version}.zip"; flag=""
-          fi
-          metadata_version="$(jq -r --arg r "${runtime}" \
-            '[.versions[] | select((.runtime // "swig") == $r)] | last | .version' metadata.json)"
-          if [[ "${version}" != "${metadata_version}" ]]; then
-            echo "Tag ${GITHUB_REF_NAME} does not match metadata.json's newest ${runtime} version ${metadata_version}." >&2
-            exit 1
-          fi
-          echo "version=${version}" >> "${GITHUB_OUTPUT}"
-          echo "archive=${archive}" >> "${GITHUB_OUTPUT}"
-          echo "flag=${flag}" >> "${GITHUB_OUTPUT}"
+          python3 tools/check_release.py "${GITHUB_REF_NAME}" >> "${GITHUB_OUTPUT}"
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -55,17 +42,21 @@ jobs:
             -f https://extras.wxpython.org/wxPython4/extras/linux/gtk3/ubuntu-24.04/
           pip install -r plugins/requirements.txt
 
-      - name: Run tests
+      # The SWIG suites need a real pcbnew, so they run in legacy-matrix.yml,
+      # which this same tag triggers.
+      - name: Run the IPC tests
         run: |
           for t in tests/ipc/test_*.py; do echo "== $t"; xvfb-run -a python "$t"; done
 
-      - name: Build PCM package
-        run: python3 build.py ${{ steps.version.outputs.flag }}
+      - name: Build both PCM packages
+        run: |
+          python3 build.py
+          python3 build.py --legacy
 
       - name: Verify metadata.json is up to date
         run: |
           if ! git diff --exit-code metadata.json; then
-            echo "metadata.json is stale -- run 'python build.py' locally and commit the result before tagging." >&2
+            echo "metadata.json is stale -- run 'python build.py' and 'python build.py --legacy' locally and commit the result before tagging." >&2
             exit 1
           fi
 
@@ -74,7 +65,8 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           gh release create "${GITHUB_REF_NAME}" \
-            "dist/${{ steps.version.outputs.archive }}" \
+            "dist/${{ steps.version.outputs.ipc_archive }}" \
+            "dist/${{ steps.version.outputs.swig_archive }}" \
             --verify-tag \
-            --title "Via Stitching ${{ github.ref_name }}" \
+            --title "Via Stitching ${GITHUB_REF_NAME}" \
             --generate-notes
