@@ -13,14 +13,40 @@
 
 import sys
 
-sys.path.insert(0, r"C:/Program Files/KiCad/6.0/bin/Lib/site-packages")
 sys.path.insert(0, __file__.rsplit("tests", 1)[0] + "plugins_legacy")
 
 import wx
 wx.DisableAsserts()
 
 import pcbnew
+import _geometry_legacy as geo
 import via_stitching_action_legacy as vsl
+
+
+def _assign_netclass(board, net, name, clearance_nm):
+    """Give `net` a netclass with this clearance, or return False.
+
+    Netclasses are the one thing the real plugin never builds, only reads, and
+    every KiCad version builds them differently: 6 has NETCLASSPTR plus
+    NETCLASSES.Add(), 7 dropped NETCLASSPTR and keeps a std::map behind
+    m_NetSettings. Rather than guess whether the wiring took, assign and then
+    ask the net what its class is called."""
+    ctor = getattr(pcbnew, "NETCLASSPTR", None) or getattr(pcbnew, "NETCLASS", None)
+    if ctor is None:
+        return False
+    netclass = ctor(name)
+    netclass.SetClearance(clearance_nm)
+
+    settings = getattr(board.GetDesignSettings(), "m_NetSettings", None)
+    try:
+        if settings is not None:
+            settings.m_NetClasses[name] = netclass
+        else:
+            board.GetDesignSettings().GetNetClasses().Add(netclass)
+        net.SetNetClass(netclass)
+    except Exception:
+        return False
+    return net.GetNetClassName() == name
 
 MM = 1_000_000
 
@@ -49,17 +75,15 @@ def main(vcc_clearance_nm):
 
     vcc = pcbnew.NETINFO_ITEM(board, "VCC")
     board.Add(vcc)
-    netclasses = board.GetNetClasses()
-    vcc_class = pcbnew.NETCLASSPTR("VCC_CLASS")
-    vcc_class.SetClearance(vcc_clearance_nm)
-    netclasses.Add(vcc_class)
-    vcc.SetNetClass(vcc_class)
+    if not _assign_netclass(board, vcc, "VCC_CLASS", vcc_clearance_nm):
+        print("SKIP")
+        return
 
     track = pcbnew.PCB_TRACK(board)
     track.SetNet(vcc)
     track.SetLayer(pcbnew.F_Cu)
-    track.SetStart(pcbnew.wxPoint(5 * MM, 0))
-    track.SetEnd(pcbnew.wxPoint(5 * MM, 10 * MM))
+    track.SetStart(geo.point(5 * MM, 0))
+    track.SetEnd(geo.point(5 * MM, 10 * MM))
     track.SetWidth(200_000)
     board.Add(track)
 

@@ -10,6 +10,12 @@ sys.path.insert(0, __file__.rsplit("tests", 1)[0] + "plugins")
 sys.path.insert(0, __file__.rsplit("tests", 1)[0] + "plugins_legacy")
 
 import pcbnew
+import wx
+
+wx.DisableAsserts()  # importing the plugin registers an ActionPlugin, see the other suites
+
+import via_stitching_action_legacy as vsl  # noqa: E402
+
 try:  # the IPC module's grid/nudge, to prove both backends share the maths
     import via_stitching_action as vsa  # noqa: E402
 except ImportError:  # kipy is not installed (CI, or any KiCad 6 box)
@@ -18,7 +24,6 @@ import _geometry_legacy as geo  # noqa: E402
 
 from shapely.geometry import Point
 from shapely.prepared import prep
-from shapely.strtree import STRtree
 
 MM = 1_000_000
 
@@ -101,12 +106,9 @@ def run():
     keepout += geo.zone_keepout_shapes(zones, "GND", via_radius_nm, clearances, span_set)
     keepout += geo.footprint_keepout_shapes(board, "GND", via_radius_nm, clearances)
 
-    tree = STRtree(keepout) if keepout else None
-    blocked = (
-        (lambda x, y: len(tree.query(Point(x, y), predicate="intersects")) > 0)
-        if tree
-        else (lambda x, y: False)
-    )
+    # The plugin's own predicate, not a copy of it: a copy silently drifted
+    # from the real one and only shapely 1.8 noticed.
+    blocked = vsl._blocked_predicate(keepout)
     prepared = prep(region)
     allowed = lambda pt: prepared.contains(pt)  # noqa: E731
 
