@@ -570,6 +570,7 @@ def test_dialogs_build():
         get_enabled_layers=lambda: list(fake_layers.keys()),
         get_layer_name=lambda layer: fake_layers[layer],
         get_selection=lambda kind: [],
+        get_items=lambda types: [],
     )
 
     dlg = ViaStitchingDialog(None, ["GND", "VCC"], fake_board)
@@ -623,6 +624,7 @@ def test_advisory_is_inline_and_non_blocking():
         get_enabled_layers=lambda: list(fake_layers.keys()),
         get_layer_name=lambda layer: fake_layers[layer],
         get_selection=lambda kind: [],
+        get_items=lambda types: [],
     )
 
     dlg = ViaStitchingDialog(None, ["GND"], fake_board)
@@ -682,6 +684,7 @@ def test_settings_persist_across_dialogs_and_reset_clears_them():
         get_enabled_layers=lambda: list(fake_layers.keys()),
         get_layer_name=lambda layer: fake_layers[layer],
         get_selection=lambda kind: [],
+        get_items=lambda types: [],
     )
 
     try:
@@ -724,6 +727,33 @@ def test_settings_persist_across_dialogs_and_reset_clears_them():
         vsa._settings_path = original_settings_path
         import shutil
         shutil.rmtree(tmp_dir, ignore_errors=True)
+
+
+def test_translation_catalogs_cover_every_wrapped_string():
+    """Every _() literal has to exist in all three catalogs, or a user running
+    KiCad in Dutch gets a half-translated dialog. The catalogs are shared with
+    the SWIG build, so this also catches the two backends wording the same
+    thing differently."""
+    import ast
+    import json
+
+    source_path = os.path.join(os.path.dirname(_i18n.__file__), "via_stitching_action.py")
+    with open(source_path, encoding="utf-8") as fh:
+        tree = ast.parse(fh.read())
+    wrapped = {
+        node.args[0].value
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+        and node.func.id == "_" and node.args
+        and isinstance(node.args[0], ast.Constant)
+    }
+    assert len(wrapped) > 40, "expected the dialog and messages to be wrapped"
+
+    for code in ("nl", "de", "fr"):
+        catalog = _i18n._catalog(code)
+        assert catalog, f"no {code} catalog found"
+        missing = sorted(wrapped - set(catalog))
+        assert not missing, f"{code}: {len(missing)} strings missing: {missing[:3]}"
 
 
 def test_translation_catalog_falls_back_to_source_text():

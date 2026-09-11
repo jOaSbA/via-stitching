@@ -77,6 +77,7 @@ def _dialog(selection=()):
         get_enabled_layers=lambda: list(LAYERS.keys()),
         get_layer_name=lambda l: LAYERS[l],
         get_selection=lambda kind: list(selection),
+        get_items=lambda types: [],
     )
     return vs.ViaStitchingDialog(None, ["GND", "VCC"], board)
 

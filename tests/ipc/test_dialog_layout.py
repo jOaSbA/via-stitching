@@ -50,6 +50,7 @@ def _board():
         get_enabled_layers=lambda: list(LAYERS.keys()),
         get_layer_name=lambda l: LAYERS[l],
         get_selection=lambda kind: [],
+        get_items=lambda types: [],
     )
 
 
