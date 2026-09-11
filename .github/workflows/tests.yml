@@ -29,4 +29,5 @@ jobs:
           pip install -r plugins/requirements.txt
 
       - name: Run tests
-        run: xvfb-run -a python tests/test_geometry.py
+        run: |
+          for t in tests/ipc/test_*.py; do echo "== $t"; xvfb-run -a python "$t"; done
