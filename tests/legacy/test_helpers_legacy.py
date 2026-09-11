@@ -23,6 +23,7 @@ import wx
 wx.DisableAsserts()  # see test_edge_cases_legacy.py for why
 
 import _geometry_legacy as geo  # noqa: E402
+import _fixtures as fixtures
 import via_stitching_action_legacy as vsl  # noqa: E402
 
 _APP = wx.App()
@@ -129,9 +130,9 @@ def test_footprint_keepout_covers_the_whole_bounding_box():
     board.Add(gnd)
     fp = pcbnew.FOOTPRINT(board)
     fp.SetPosition(geo.point(5 * MM, 5 * MM))
-    body = pcbnew.FP_SHAPE(fp)
+    body = fixtures.fp_shape(fp)
     body.SetLayer(pcbnew.F_SilkS)
-    body.SetShape(pcbnew.S_RECT)
+    body.SetShape(fixtures.rectangle())
     body.SetStart(geo.point(4 * MM, 4 * MM))
     body.SetEnd(geo.point(6 * MM, 6 * MM))
     fp.Add(body)

@@ -17,6 +17,7 @@ import wx
 # blocks the process until a human clicks it.
 wx.DisableAsserts()
 
+import _fixtures as fixtures
 import via_stitching_action_legacy as vsl
 import _geometry_legacy as geo
 
@@ -156,7 +157,7 @@ def test_same_net_pth_pad_drill_keepout_still_applies():
     pad.SetSize(geo.size(1 * MM, 1 * MM))
     pad.SetDrillSize(geo.size(600_000, 600_000))
     pad.SetPosition(geo.point(5 * MM, 5 * MM))
-    pad.SetLayerSet(pcbnew.LSET(pcbnew.F_Cu))
+    pad.SetLayerSet(fixtures.layer_set(pcbnew.F_Cu))
     pad.SetNet(net)  # same net as the stitch target
     fp.Add(pad)
     board.Add(fp)

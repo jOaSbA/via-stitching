@@ -30,6 +30,7 @@ import wx
 wx.DisableAsserts()
 
 import _geometry_legacy as geo
+import _fixtures as fixtures
 import via_stitching_action_legacy as vsl
 
 MM = 1_000_000
@@ -155,11 +156,11 @@ def test_avoid_footprints_toggle():
         pad.SetAttribute(pcbnew.PAD_ATTRIB_SMD)
         pad.SetSize(geo.size(200_000, 200_000))
         pad.SetPosition(geo.point(int(5 * MM - 1.9 * MM), 5 * MM))
-        pad.SetLayerSet(pcbnew.LSET(pcbnew.F_Cu))
+        pad.SetLayerSet(fixtures.layer_set(pcbnew.F_Cu))
         fp.Add(pad)
-        body = pcbnew.FP_SHAPE(fp)
+        body = fixtures.fp_shape(fp)
         body.SetLayer(pcbnew.F_SilkS)
-        body.SetShape(pcbnew.S_RECT)
+        body.SetShape(fixtures.rectangle())
         body.SetStart(geo.point(int(5 * MM - 2 * MM), int(5 * MM - 2 * MM)))
         body.SetEnd(geo.point(int(5 * MM + 2 * MM), int(5 * MM + 2 * MM)))
         fp.Add(body)
@@ -182,7 +183,7 @@ def test_avoid_same_net_pads_toggle():
         pad = pcbnew.PAD(fp)
         pad.SetSize(geo.size(3 * MM, 3 * MM))
         pad.SetPosition(geo.point(5 * MM, 5 * MM))
-        pad.SetLayerSet(pcbnew.LSET(pcbnew.F_Cu))
+        pad.SetLayerSet(fixtures.layer_set(pcbnew.F_Cu))
         pad.SetNet(gnd)
         fp.Add(pad)
         board.Add(fp)

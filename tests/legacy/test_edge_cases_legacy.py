@@ -25,6 +25,7 @@ import wx
 # theoretical. DisableAsserts() must run before that import.
 wx.DisableAsserts()
 
+import _fixtures as fixtures
 import via_stitching_action_legacy as vsl
 import _geometry_legacy as geo
 
@@ -312,7 +313,7 @@ def test_zero_size_pad_does_not_crash():
     pad = pcbnew.PAD(fp)
     pad.SetSize(geo.size(0, 0))
     pad.SetPosition(geo.point(5 * MM, 5 * MM))
-    pad.SetLayerSet(pcbnew.LSET(pcbnew.F_Cu))
+    pad.SetLayerSet(fixtures.layer_set(pcbnew.F_Cu))
     fp.Add(pad)
     board.Add(fp)
     placed, _ = vsl.stitch(board, pcbnew.VIATYPE_THROUGH, pcbnew.F_Cu, pcbnew.B_Cu, "GND",

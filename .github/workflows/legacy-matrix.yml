@@ -1,0 +1,55 @@
+# TEMPORARY. Runs the legacy suites, and the built archive's own smoke test, on
+# every KiCad the package claims: 6 and 7 from stock Ubuntu, 8 and 9 from the
+# KiCad PPAs. Delete once 8 and 9 are green.
+
+name: legacy-matrix (temporary)
+
+on: [push, workflow_dispatch]
+
+jobs:
+  legacy:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - kicad: "6"
+            os: ubuntu-22.04
+            ppa: ""
+          - kicad: "7"
+            os: ubuntu-24.04
+            ppa: ""
+          - kicad: "8"
+            os: ubuntu-24.04
+            ppa: "ppa:kicad/kicad-8.0-releases"
+          - kicad: "9"
+            os: ubuntu-24.04
+            ppa: "ppa:kicad/kicad-9.0-releases"
+    name: KiCad ${{ matrix.kicad }}
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install KiCad ${{ matrix.kicad }}
+        run: |
+          if [ -n "${{ matrix.ppa }}" ]; then
+            sudo add-apt-repository -y "${{ matrix.ppa }}"
+          fi
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            kicad python3-wxgtk4.0 python3-shapely xvfb
+          python3 -c "import pcbnew; print('pcbnew', pcbnew.GetBuildVersion())"
+
+      - name: Install the built archive and stitch a board
+        run: |
+          python3 build.py --legacy
+          xvfb-run -a python3 tests/legacy/zip_smoke.py "$(ls dist/via-stitching-legacy-*.zip)"
+
+      - name: Run the legacy suites
+        run: |
+          failed=""
+          for t in tests/legacy/test_*.py; do
+            echo "::group::$t"
+            if xvfb-run -a python3 "$t"; then echo "PASS $t"; else failed="$failed $t"; fi
+            echo "::endgroup::"
+          done
+          if [ -n "$failed" ]; then echo "FAILED:$failed"; exit 1; fi
