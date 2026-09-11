@@ -119,7 +119,7 @@ def test_clone_from_via_with_no_net_assigned():
     via = pcbnew.PCB_VIA(board)
     via.SetViaType(pcbnew.VIATYPE_THROUGH)
     via.SetLayerPair(pcbnew.F_Cu, pcbnew.B_Cu)
-    via.SetPosition(pcbnew.wxPoint(1 * MM, 1 * MM))
+    via.SetPosition(geo.point(1 * MM, 1 * MM))
     via.SetWidth(500_000)
     via.SetDrill(250_000)
     via.SetSelected()  # netcode left at 0 (default, no net) deliberately

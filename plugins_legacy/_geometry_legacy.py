@@ -10,10 +10,79 @@
 # work; the spikes remain as the record of what was checked and why.
 
 import math
+import re
 from collections import defaultdict
 
 FALLBACK_CLEARANCE_MM = 0.2
 FALLBACK_CLEARANCE_NM = round(FALLBACK_CLEARANCE_MM * 1_000_000)
+
+_MAJOR = None
+
+
+def kicad_major():
+    """Major KiCad version behind the loaded bindings. Build strings differ by
+    packaging ("(6.0.11)" from the Windows installer, "7.0.11+dfsg-1build4"
+    from Ubuntu), so take the first number in whatever we get."""
+    global _MAJOR
+    if _MAJOR is None:
+        import pcbnew
+
+        m = re.search(r"\d+", pcbnew.GetBuildVersion())
+        _MAJOR = int(m.group()) if m else 6
+    return _MAJOR
+
+
+def point(x, y):
+    """A position argument for the pcbnew setters, on any supported KiCad.
+
+    KiCad 6 typemaps these as wxPoint and rejects VECTOR2I; KiCad 7 rejects
+    wxPoint and demands VECTOR2I. Both symbols exist in both versions, so
+    hasattr() cannot tell them apart and only the version can. Verified
+    against real 6.0.2, 6.0.11 and 7.0.11 bindings."""
+    import pcbnew
+
+    ctor = pcbnew.wxPoint if kicad_major() < 7 else pcbnew.VECTOR2I
+    return ctor(int(x), int(y))
+
+
+def size(x, y):
+    """The same split as point(), for setters taking a size (wxSize on 6)."""
+    import pcbnew
+
+    ctor = pcbnew.wxSize if kicad_major() < 7 else pcbnew.VECTOR2I
+    return ctor(int(x), int(y))
+
+
+def _netclass_resolver(board):
+    """Returns lookup(netclass_name) -> netclass or None, built once per board.
+
+    Three incompatible layouts, all seen on real bindings:
+      - KiCad 7: design settings carry m_NetSettings, holding an
+        m_NetClasses std::map plus m_DefaultNetClass.
+      - KiCad 6: design settings expose GetNetClasses() -> NETCLASSES, with
+        Find()/GetDefault().
+      - board.GetNetClasses() is a convenience wrapper over
+        BOARD_DESIGN_SETTINGS.m_NetClasses, which 6.0.11 exposes but Ubuntu's
+        6.0.2 build does not, so it raises AttributeError there. It is tried
+        last rather than first for exactly that reason."""
+    ds = board.GetDesignSettings()
+
+    settings = getattr(ds, "m_NetSettings", None)
+    if settings is not None:
+        classes = settings.m_NetClasses.asdict()
+        default = settings.m_DefaultNetClass
+        return lambda name: classes.get(name) or default
+
+    for getter in (getattr(ds, "GetNetClasses", None), getattr(board, "GetNetClasses", None)):
+        if getter is None:
+            continue
+        try:
+            classes = getter()
+        except Exception:
+            continue
+        return lambda name: classes.Find(name) or classes.GetDefault()
+
+    return lambda name: None
 
 
 def _line_chain_coords(chain):
@@ -99,15 +168,15 @@ def net_clearances(board, net_name):
     """Clearance in nm to hold between a via on net_name and each other net.
 
     KiCad resolves the clearance between two items to the larger of their
-    two netclass values, so that maximum is precomputed here per net. Reads
-    the netclass via board.GetNetClasses().Find(net.GetNetClassName()), not
-    net.GetNetClass()/GetEffectiveNetclass() -- both of those return a
-    broken untyped object with no usable methods on a real KiCad 6.0 board."""
-    netclasses = board.GetNetClasses()
+    two netclass values, so that maximum is precomputed here per net. Goes
+    through the netclass name (a plain string) and _netclass_resolver, never
+    net.GetNetClass()/GetEffectiveNetclass() -- both of those return a broken
+    untyped object with no usable methods on every version checked."""
+    resolve = _netclass_resolver(board)
     values = {}
     for net in board.GetNetsByNetcode().values():
-        nc = netclasses.Find(net.GetNetClassName()) or netclasses.GetDefault()
-        values[net.GetNetname()] = nc.GetClearance()
+        nc = resolve(net.GetNetClassName())
+        values[net.GetNetname()] = nc.GetClearance() if nc is not None else FALLBACK_CLEARANCE_NM
 
     own = values.get(net_name, FALLBACK_CLEARANCE_NM)
     clearances = defaultdict(lambda: FALLBACK_CLEARANCE_NM)
@@ -297,11 +366,12 @@ def make_via(board, via_type, start_layer, end_layer, diameter_nm, drill_nm, net
 
     SetViaType MUST come before SetLayerPair: calling them in the other
     order silently resets the via's span to a full F_Cu-B_Cu through-via
-    span with no error, confirmed on a real board."""
+    span with no error, confirmed on a real board. The position goes through
+    point(), which is what keeps this working on both KiCad 6 and 7."""
     import pcbnew
 
     via = pcbnew.PCB_VIA(board)
-    via.SetPosition(pcbnew.wxPoint(int(x), int(y)))
+    via.SetPosition(point(x, y))
     via.SetViaType(via_type)
     via.SetLayerPair(start_layer, end_layer)
     via.SetWidth(diameter_nm)

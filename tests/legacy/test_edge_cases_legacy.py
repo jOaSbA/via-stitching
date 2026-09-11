@@ -277,8 +277,8 @@ def test_zero_length_track_does_not_crash():
     track = pcbnew.PCB_TRACK(board)
     track.SetNet(vcc)
     track.SetLayer(pcbnew.F_Cu)
-    track.SetStart(pcbnew.wxPoint(5 * MM, 5 * MM))
-    track.SetEnd(pcbnew.wxPoint(5 * MM, 5 * MM))  # zero length
+    track.SetStart(geo.point(5 * MM, 5 * MM))
+    track.SetEnd(geo.point(5 * MM, 5 * MM))  # zero length
     track.SetWidth(200_000)
     board.Add(track)
     placed, _ = vsl.stitch(board, pcbnew.VIATYPE_THROUGH, pcbnew.F_Cu, pcbnew.B_Cu, "GND",
@@ -294,7 +294,7 @@ def test_degenerate_arc_does_not_crash():
     arc = pcbnew.PCB_ARC(board)
     arc.SetNet(vcc)
     arc.SetLayer(pcbnew.F_Cu)
-    p = pcbnew.wxPoint(5 * MM, 5 * MM)
+    p = geo.point(5 * MM, 5 * MM)
     arc.SetStart(p)
     arc.SetMid(p)
     arc.SetEnd(p)  # all three points identical
@@ -310,8 +310,8 @@ def test_zero_size_pad_does_not_crash():
     board, net = _board(layers=2, size=10 * MM)
     fp = pcbnew.FOOTPRINT(board)
     pad = pcbnew.PAD(fp)
-    pad.SetSize(pcbnew.wxSize(0, 0))
-    pad.SetPosition(pcbnew.wxPoint(5 * MM, 5 * MM))
+    pad.SetSize(geo.size(0, 0))
+    pad.SetPosition(geo.point(5 * MM, 5 * MM))
     pad.SetLayerSet(pcbnew.LSET(pcbnew.F_Cu))
     fp.Add(pad)
     board.Add(fp)
@@ -324,7 +324,7 @@ def test_zero_size_pad_does_not_crash():
 def test_footprint_with_no_pads_does_not_crash():
     board, net = _board(layers=2, size=10 * MM)
     fp = pcbnew.FOOTPRINT(board)
-    fp.SetPosition(pcbnew.wxPoint(5 * MM, 5 * MM))
+    fp.SetPosition(geo.point(5 * MM, 5 * MM))
     board.Add(fp)
     placed, _ = vsl.stitch(board, pcbnew.VIATYPE_THROUGH, pcbnew.F_Cu, pcbnew.B_Cu, "GND",
                             via_dia_mm=0.6, drill_mm=0.3, spacing_mm=2.0, pattern="Square",

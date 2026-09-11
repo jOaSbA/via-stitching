@@ -61,8 +61,8 @@ def test_same_net_track_is_not_a_keepout():
     track = pcbnew.PCB_TRACK(board)
     track.SetNet(net)  # same net as the stitch target
     track.SetLayer(pcbnew.F_Cu)
-    track.SetStart(pcbnew.wxPoint(5 * MM, 0))
-    track.SetEnd(pcbnew.wxPoint(5 * MM, 10 * MM))
+    track.SetStart(geo.point(5 * MM, 0))
+    track.SetEnd(geo.point(5 * MM, 10 * MM))
     track.SetWidth(500_000)
     board.Add(track)
     placed, _ = vsl.stitch(board, pcbnew.VIATYPE_THROUGH, pcbnew.F_Cu, pcbnew.B_Cu, "GND",
@@ -83,8 +83,8 @@ def test_track_outside_span_is_not_a_keepout():
     track = pcbnew.PCB_TRACK(board)
     track.SetNet(vcc)
     track.SetLayer(pcbnew.B_Cu)  # outside the F_Cu<->In1_Cu span
-    track.SetStart(pcbnew.wxPoint(5 * MM, 0))
-    track.SetEnd(pcbnew.wxPoint(5 * MM, 10 * MM))
+    track.SetStart(geo.point(5 * MM, 0))
+    track.SetEnd(geo.point(5 * MM, 10 * MM))
     track.SetWidth(2 * MM)  # deliberately huge, so if it DID apply it would block everything
     board.Add(track)
     placed, _ = vsl.stitch(board, pcbnew.VIATYPE_BLIND_BURIED, pcbnew.F_Cu, pcbnew.In1_Cu, "GND",
@@ -153,9 +153,9 @@ def test_same_net_pth_pad_drill_keepout_still_applies():
     fp = pcbnew.FOOTPRINT(board)
     pad = pcbnew.PAD(fp)
     pad.SetAttribute(pcbnew.PAD_ATTRIB_PTH)
-    pad.SetSize(pcbnew.wxSize(1 * MM, 1 * MM))
-    pad.SetDrillSize(pcbnew.wxSize(600_000, 600_000))
-    pad.SetPosition(pcbnew.wxPoint(5 * MM, 5 * MM))
+    pad.SetSize(geo.size(1 * MM, 1 * MM))
+    pad.SetDrillSize(geo.size(600_000, 600_000))
+    pad.SetPosition(geo.point(5 * MM, 5 * MM))
     pad.SetLayerSet(pcbnew.LSET(pcbnew.F_Cu))
     pad.SetNet(net)  # same net as the stitch target
     fp.Add(pad)
@@ -255,8 +255,8 @@ def test_pad_with_empty_layerset_does_not_crash():
     fp = pcbnew.FOOTPRINT(board)
     pad = pcbnew.PAD(fp)
     pad.SetAttribute(pcbnew.PAD_ATTRIB_SMD)
-    pad.SetSize(pcbnew.wxSize(1 * MM, 1 * MM))
-    pad.SetPosition(pcbnew.wxPoint(5 * MM, 5 * MM))
+    pad.SetSize(geo.size(1 * MM, 1 * MM))
+    pad.SetPosition(geo.point(5 * MM, 5 * MM))
     pad.SetLayerSet(pcbnew.LSET())  # empty: on no layers at all
     fp.Add(pad)
     board.Add(fp)

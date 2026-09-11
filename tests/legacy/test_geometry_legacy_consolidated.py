@@ -70,8 +70,8 @@ def run():
     track = pcbnew.PCB_TRACK(board)
     track.SetNet(vcc)
     track.SetLayer(pcbnew.F_Cu)
-    track.SetStart(pcbnew.wxPoint(0, 5 * MM))
-    track.SetEnd(pcbnew.wxPoint(size, 5 * MM))
+    track.SetStart(geo.point(0, 5 * MM))
+    track.SetEnd(geo.point(size, 5 * MM))
     track.SetWidth(300_000)
     board.Add(track)
 
