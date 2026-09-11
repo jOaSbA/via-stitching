@@ -3,8 +3,8 @@
 # Fills the overlap of a net's copper zones (e.g. the top + bottom GND pours)
 # with a grid of vias, on whichever two copper layers you pick. Same feature
 # as the IPC version (via_stitching_action.py, KiCad 10+), reimplemented on
-# the legacy pcbnew SWIG API for KiCad versions that predate the IPC API
-# entirely (6, 7, 8) -- see via-stitching/tests/legacy/ for the
+# the legacy pcbnew SWIG API for KiCad versions the IPC build does not
+# cover (6 through 9) -- see via-stitching/tests/legacy/ for the
 # verification work behind every board-touching call in _geometry_legacy.py.
 #
 # Requires the zones to already be filled (press B in the PCB editor first) --
