@@ -59,35 +59,54 @@ def size(x, y):
 
 
 def _netclass_resolver(board):
-    """Returns lookup(netclass_name) -> netclass or None, built once per board.
+    """Returns lookup(net) -> netclass or None, built once per board.
 
-    Three incompatible layouts, all seen on real bindings:
-      - KiCad 7: design settings carry m_NetSettings, holding an
-        m_NetClasses std::map plus m_DefaultNetClass.
-      - KiCad 6: design settings expose GetNetClasses() -> NETCLASSES, with
-        Find()/GetDefault().
-      - board.GetNetClasses() is a convenience wrapper over
-        BOARD_DESIGN_SETTINGS.m_NetClasses, which 6.0.11 exposes but Ubuntu's
-        6.0.2 build does not, so it raises AttributeError there. It is tried
-        last rather than first for exactly that reason."""
+    KiCad 7 keeps netclasses in a std::map behind m_NetSettings, but a class
+    put into that map from Python does not come back out of it by name, so
+    reading the container is not a reliable route there. Asking the net for
+    its own class is: NETINFO_ITEM.GetNetClassSlow() hands back a real
+    NETCLASS on 7. (GetNetClass()/GetEffectiveNetclass() stay off limits on
+    every version -- both return an untyped object with no usable methods.)
+
+    KiCad 6 has no GetNetClassSlow and falls through to NETCLASSES.Find().
+    board.GetNetClasses() is a wrapper over BOARD_DESIGN_SETTINGS.m_NetClasses,
+    which 6.0.11 exposes and Ubuntu's 6.0.2 does not, so it is tried after the
+    design settings' own getter rather than before it."""
     ds = board.GetDesignSettings()
 
-    settings = getattr(ds, "m_NetSettings", None)
-    if settings is not None:
-        classes = settings.m_NetClasses.asdict()
-        default = settings.m_DefaultNetClass
-        return lambda name: classes.get(name) or default
-
+    containers = []
     for getter in (getattr(ds, "GetNetClasses", None), getattr(board, "GetNetClasses", None)):
         if getter is None:
             continue
         try:
-            classes = getter()
+            containers.append(getter())
         except Exception:
             continue
-        return lambda name: classes.Find(name) or classes.GetDefault()
 
-    return lambda name: None
+    fallback = getattr(getattr(ds, "m_NetSettings", None), "m_DefaultNetClass", None)
+
+    def lookup(net):
+        ask_the_net = getattr(net, "GetNetClassSlow", None)
+        if ask_the_net is not None:
+            try:
+                netclass = ask_the_net()
+                if netclass is not None and hasattr(netclass, "GetClearance"):
+                    return netclass
+            except Exception:
+                pass
+
+        name = net.GetNetClassName()
+        for classes in containers:
+            find = getattr(classes, "Find", None)
+            if find is None:
+                continue
+            try:
+                return find(name) or classes.GetDefault()
+            except Exception:
+                continue
+        return fallback
+
+    return lookup
 
 
 def _line_chain_coords(chain):
@@ -180,7 +199,7 @@ def net_clearances(board, net_name):
     resolve = _netclass_resolver(board)
     values = {}
     for net in board.GetNetsByNetcode().values():
-        nc = resolve(net.GetNetClassName())
+        nc = resolve(net)
         values[net.GetNetname()] = nc.GetClearance() if nc is not None else FALLBACK_CLEARANCE_NM
 
     own = values.get(net_name, FALLBACK_CLEARANCE_NM)
