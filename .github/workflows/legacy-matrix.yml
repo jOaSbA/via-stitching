@@ -51,7 +51,7 @@ jobs:
       - name: Install the built archive and stitch a board
         run: |
           python3 build.py --legacy
-          xvfb-run -a python3 tests/legacy/zip_smoke.py "$(ls dist/via-stitching-legacy-*.zip)"
+          xvfb-run -a python3 tests/legacy/zip_smoke.py "$(ls dist/via-stitching-swig-*.zip)"
 
       - name: Run the legacy suites
         run: |
