@@ -1,0 +1,7 @@
+# The release archives are built from the working tree, so their checksums
+# depend on the line endings on disk. CI builds them on Linux, and the release
+# workflow refuses to publish if its rebuild disagrees with metadata.json, so a
+# Windows checkout with core.autocrlf on would produce an archive that can never
+# match. Normalise on checkout instead of teaching build.py to paper over it.
+* text=auto eol=lf
+*.png binary
