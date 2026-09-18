@@ -54,11 +54,19 @@ EXCLUDE_EXTS = (".pyc", ".pyo")
 # committed in metadata.json.
 ZIP_EPOCH = (1980, 1, 1, 0, 0, 0)
 
+# ZipInfo otherwise stamps each entry with the platform it was built on (0 for
+# Windows, 3 for Unix), one byte per entry that no amount of identical content
+# can cancel out: a Windows build and a Linux build of the same sources come out
+# the same length with different checksums. The release is built on Linux, so
+# every build says Unix.
+ZIP_CREATE_SYSTEM = 3
+
 
 def _write(zf, arcname, data):
     info = zipfile.ZipInfo(arcname, date_time=ZIP_EPOCH)
     info.compress_type = zipfile.ZIP_DEFLATED
     info.external_attr = 0o644 << 16
+    info.create_system = ZIP_CREATE_SYSTEM
     zf.writestr(info, data)
 
 
