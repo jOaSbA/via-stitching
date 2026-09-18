@@ -1,8 +1,7 @@
 # Coverage tests for plugins_legacy/via_stitching_action_legacy.py's real
-# stitch() function, run against real KiCad 6.0 boards. Extends
-# dual_backend_spike_full_stitch_legacy.py (one realistic multi-layer run)
-# with per-feature isolation: via types, patterns, the VIA_COUNT_WARN
-# prompt, and all three avoid_* toggles.
+# stitch() function, run against real KiCad 6.0 boards, one feature per
+# test: via types and their spans, all three patterns, the VIA_COUNT_WARN
+# prompt, and each avoid_* toggle.
 #
 # Two real findings from building these:
 #  - A "Through" via always spans the full F_Cu-B_Cu board regardless of
