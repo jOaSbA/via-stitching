@@ -30,7 +30,7 @@ import _geometry_legacy as geo  # noqa: E402
 from _i18n_legacy import _  # noqa: E402
 from _kicad_config_legacy import kicad_config_dirs  # noqa: E402
 
-VERSION = "1.2.1"
+VERSION = "1.2.2"
 
 DEFAULT_NET = "GND"
 DEFAULT_VIA_DIAMETER_MM = 0.6
@@ -312,7 +312,13 @@ def stitch(board, via_type, start_layer, end_layer, net_name, via_dia_mm, drill_
             region_by_layer[layer] = r
 
     missing = [l for l in (start_layer, end_layer) if l not in region_by_layer]
-    if missing:
+    poured = [l for l in (start_layer, end_layer) if l in region_by_layer]
+    is_through = via_type == pcbnew.VIATYPE_THROUGH
+    if is_through and poured:
+        region = region_by_layer[poured[0]]
+        if len(poured) == 2:
+            region = region.intersection(region_by_layer[poured[1]])
+    elif missing:
         names = ", ".join(board.GetLayerName(l) for l in missing)
         raise RuntimeError(
             _(
@@ -321,8 +327,9 @@ def stitch(board, via_type, start_layer, end_layer, net_name, via_dia_mm, drill_
                 "first (press B in the PCB editor)."
             ).format(net=net_name, layers=names)
         )
+    else:
+        region = region_by_layer[start_layer].intersection(region_by_layer[end_layer])
 
-    region = region_by_layer[start_layer].intersection(region_by_layer[end_layer])
     for layer in span:
         if layer in region_by_layer and layer not in (start_layer, end_layer):
             region = region.intersection(region_by_layer[layer])

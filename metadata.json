@@ -115,6 +115,16 @@
       "install_size": 139022
     },
     {
+      "version": "3.0.3",
+      "status": "stable",
+      "kicad_version": "10.0",
+      "runtime": "ipc",
+      "download_url": "https://github.com/jOaSbA/via-stitching/releases/download/v3.0.3/via-stitching-3.0.3.zip",
+      "download_sha256": "d892b0a1342ec3197545a2a13888389d59819ee1c1d68bc71e146d593439dc47",
+      "download_size": 62254,
+      "install_size": 151183
+    },
+    {
       "version": "1.2.0",
       "status": "stable",
       "kicad_version": "6.0",
@@ -135,6 +145,17 @@
       "download_sha256": "8143d34232b19d2dbda7db6bd645f84a2e7e1951577c08c40b83588678f236a7",
       "download_size": 45270,
       "install_size": 112884
+    },
+    {
+      "version": "1.2.2",
+      "status": "stable",
+      "kicad_version": "6.0",
+      "kicad_version_max": "9.0",
+      "runtime": "swig",
+      "download_url": "https://github.com/jOaSbA/via-stitching/releases/download/v3.0.3/via-stitching-swig-1.2.2.zip",
+      "download_sha256": "4a89cf31d882df3ba481f743c088624894896eed0a8894f9a6ebb4604c4e65b3",
+      "download_size": 50397,
+      "install_size": 125037
     }
   ]
 }

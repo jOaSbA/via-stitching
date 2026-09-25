@@ -51,7 +51,7 @@ from _win_dialog import make_tool_window  # noqa: E402
 from _kicad_config import kicad_config_dirs  # noqa: E402
 from _i18n import _  # noqa: E402
 
-VERSION = "3.0.2"
+VERSION = "3.0.3"
 
 # shapely (plus the numpy and GEOS it drags in) costs the better part of a second
 # to import, more than the rest of start-up together, so the geometry functions
@@ -818,8 +818,16 @@ def stitch(
     span = _span_layers(board, start_layer, end_layer)
 
     # The via must land on the net's copper on the two layers it connects.
+    # through via is the exception.
     missing = [l for l in (start_layer, end_layer) if l not in regions]
-    if missing:
+    poured = [l for l in (start_layer, end_layer) if l in regions]
+    is_through = via_type == ViaType.VT_THROUGH
+
+    if is_through and poured:
+        region = regions[poured[0]]
+        if len(poured) == 2:
+            region = region.intersection(regions[poured[1]])
+    elif missing:
         names = ", ".join(board.get_layer_name(l) for l in missing)
         raise RuntimeError(
             _(
@@ -828,8 +836,8 @@ def stitch(
                 "first (press B in the PCB editor)."
             ).format(net=net_name, layers=names)
         )
-
-    region = regions[start_layer].intersection(regions[end_layer])
+    else:
+        region = regions[start_layer].intersection(regions[end_layer])
 
     # Intermediate layers inside the span: where this net is poured there too,
     # keep the via on that copper (the barrel connects those layers as well).

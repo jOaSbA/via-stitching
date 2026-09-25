@@ -3,7 +3,8 @@
 # realistic run and then tests the helpers in isolation; this file covers the
 # per-feature paths through stitch() itself that nothing else reaches: via
 # types and their spans, every pattern, the VIA_COUNT_WARN prompt, the two
-# avoid_* toggles that need board content to show any effect, and grouping.
+# avoid_* toggles that need board content to show any effect, grouping, and
+# the copper check that only a through via is exempt from.
 #
 # Offline, like the rest of tests/: the fake board from test_geometry.py is
 # reused and extended rather than duplicated.
@@ -107,6 +108,46 @@ def test_via_types_keep_the_span_they_were_asked_for():
         assert all(v.type == via_type for v in vias), via_type
         assert all(v.padstack.drill.start_layer == start for v in vias), via_type
         assert all(v.padstack.drill.end_layer == end for v in vias), via_type
+
+
+def test_a_through_via_only_needs_copper_on_one_end():
+    # Through via runs the whole board, so the net only has to be poured on
+    # one of the two layers it connects. The other end is left to DRC, like
+    # the layers in between.
+    board, zones = _board()
+    del zones[0].filled_polygons[BoardLayer.BL_B_Cu]
+    count, _grouped = _run(board)
+    assert count > 0
+    assert all(v.padstack.drill.start_layer == BoardLayer.BL_F_Cu for v in _vias(board))
+    assert all(v.padstack.drill.end_layer == BoardLayer.BL_B_Cu for v in _vias(board))
+
+
+def test_a_through_via_with_no_poured_end_still_fails():
+    # Copper for the net exists, but not on either layer this via connects:
+    # the error has to name both, not die on the missing key.
+    board, zones = _board(inner_layer=True)
+    del zones[0].filled_polygons[BoardLayer.BL_F_Cu]
+    del zones[0].filled_polygons[BoardLayer.BL_B_Cu]
+    try:
+        _run(board)
+    except RuntimeError as exc:
+        assert "F.Cu" in str(exc) and "B.Cu" in str(exc), exc
+    else:
+        raise AssertionError("a through via with no poured end should have failed")
+
+
+def test_only_through_vias_are_exempt_from_the_copper_check():
+    # Micro and blind/buried vias end inside the board。
+    # both of their ends have to land on the net's copper 
+    for via_type in (ViaType.VT_MICRO, ViaType.VT_BLIND_BURIED):
+        board, zones = _board(inner_layer=True)
+        del zones[0].filled_polygons[BoardLayer.BL_In1_Cu]
+        try:
+            _run(board, via_type, BoardLayer.BL_F_Cu, BoardLayer.BL_In1_Cu)
+        except RuntimeError as exc:
+            assert "In1.Cu" in str(exc), exc
+        else:
+            raise AssertionError(f"{via_type} must still land on copper at both ends")
 
 
 def test_all_patterns_place_something():
