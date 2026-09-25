@@ -272,8 +272,29 @@ def test_error_dialog_carries_the_traceback():
         dlg.Destroy()
 
 
+def test_missing_shapely_is_reported_before_the_dialog_opens():
+    """KiCad ships no shapely, and on Linux it runs the system Python, so a
+    fresh install hits this first. Without the check the user filled in the
+    whole dialog and then got a ModuleNotFoundError traceback."""
+    shown, opened = [], []
+    saved = (sys.modules.get("shapely"), vsl.wx.MessageBox, vsl.ViaStitchingDialogLegacy)
+    sys.modules["shapely"] = None  # makes `import shapely` raise ImportError
+    vsl.wx.MessageBox = lambda text, *a, **k: shown.append(text)
+    vsl.ViaStitchingDialogLegacy = lambda *a, **k: opened.append(1)
+    try:
+        vsl.ViaStitchingLegacy().Run()
+    finally:
+        if saved[0] is None:
+            del sys.modules["shapely"]
+        else:
+            sys.modules["shapely"] = saved[0]
+        vsl.wx.MessageBox, vsl.ViaStitchingDialogLegacy = saved[1:]
+    assert not opened, "dialog opened without shapely"
+    assert len(shown) == 1 and "python3-shapely" in shown[0], shown
+
+
 def run():
-    tests = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
+    tests =[v for k, v in sorted(globals().items()) if k.startswith("test_")]
     for test in tests:
         test()
         print(f"PASS: {test.__name__}")
