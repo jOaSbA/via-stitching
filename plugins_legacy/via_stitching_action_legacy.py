@@ -30,7 +30,7 @@ import _geometry_legacy as geo  # noqa: E402
 from _i18n_legacy import _  # noqa: E402
 from _kicad_config_legacy import kicad_config_dirs  # noqa: E402
 
-VERSION = "1.2.0"
+VERSION = "1.2.1"
 
 DEFAULT_NET = "GND"
 DEFAULT_VIA_DIAMETER_MM = 0.6

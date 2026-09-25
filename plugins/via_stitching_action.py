@@ -51,7 +51,7 @@ from _win_dialog import make_tool_window  # noqa: E402
 from _kicad_config import kicad_config_dirs  # noqa: E402
 from _i18n import _  # noqa: E402
 
-VERSION = "3.0.1"
+VERSION = "3.0.2"
 
 # shapely (plus the numpy and GEOS it drags in) costs the better part of a second
 # to import, more than the rest of start-up together, so the geometry functions
