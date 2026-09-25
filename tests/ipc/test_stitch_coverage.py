@@ -36,6 +36,7 @@ MM = from_mm(1.0)
 LAYER_NAMES = {
     BoardLayer.BL_F_Cu: "F.Cu",
     BoardLayer.BL_In1_Cu: "In1.Cu",
+    BoardLayer.BL_In2_Cu: "In2.Cu",
     BoardLayer.BL_B_Cu: "B.Cu",
 }
 
@@ -110,11 +111,10 @@ def test_via_types_keep_the_span_they_were_asked_for():
         assert all(v.padstack.drill.end_layer == end for v in vias), via_type
 
 
-def test_a_through_via_only_needs_copper_on_one_end():
-    # Through via runs the whole board, so the net only has to be poured on
-    # one of the two layers it connects. The other end is left to DRC, like
-    # the layers in between.
-    board, zones = _board()
+def test_a_through_via_needs_two_poured_layers_not_both_ends():
+    # The barrel crosses every layer, so a through via can stitch any two
+    # layers the net is poured on. Here the back is unpoured.
+    board, zones = _board(inner_layer=True)
     del zones[0].filled_polygons[BoardLayer.BL_B_Cu]
     count, _grouped = _run(board)
     assert count > 0
@@ -122,23 +122,41 @@ def test_a_through_via_only_needs_copper_on_one_end():
     assert all(v.padstack.drill.end_layer == BoardLayer.BL_B_Cu for v in _vias(board))
 
 
-def test_a_through_via_with_no_poured_end_still_fails():
-    # Copper for the net exists, but not on either layer this via connects:
-    # the error has to name both, not die on the missing key.
+def test_a_through_via_stitches_two_inner_planes():
+    # Neither outer layer poured at all, which is the usual four-layer board
+    # with its planes on the inside.
     board, zones = _board(inner_layer=True)
-    del zones[0].filled_polygons[BoardLayer.BL_F_Cu]
-    del zones[0].filled_polygons[BoardLayer.BL_B_Cu]
-    try:
-        _run(board)
-    except RuntimeError as exc:
-        assert "F.Cu" in str(exc) and "B.Cu" in str(exc), exc
-    else:
-        raise AssertionError("a through via with no poured end should have failed")
+    fills = zones[0].filled_polygons
+    fills[BoardLayer.BL_In2_Cu] = fills[BoardLayer.BL_In1_Cu]
+    del fills[BoardLayer.BL_F_Cu], fills[BoardLayer.BL_B_Cu]
+    board.get_enabled_layers = lambda: [
+        BoardLayer.BL_F_Cu, BoardLayer.BL_In1_Cu, BoardLayer.BL_In2_Cu, BoardLayer.BL_B_Cu,
+    ]
+    count, _grouped = _run(board)
+    assert count > 0
+
+
+def test_a_through_via_on_one_poured_layer_fails():
+    # One poured layer gives the via nothing to stitch it to, so every via
+    # would be dangling. The error names the unpoured ends.
+    for inner_layer, unpoured, named in (
+        (False, [BoardLayer.BL_B_Cu], ["B.Cu"]),
+        (True, [BoardLayer.BL_F_Cu, BoardLayer.BL_B_Cu], ["F.Cu", "B.Cu"]),
+    ):
+        board, zones = _board(inner_layer=inner_layer)
+        for layer in unpoured:
+            del zones[0].filled_polygons[layer]
+        try:
+            _run(board)
+        except RuntimeError as exc:
+            assert all(n in str(exc) for n in named), exc
+        else:
+            raise AssertionError(f"one poured layer should have failed ({named})")
 
 
 def test_only_through_vias_are_exempt_from_the_copper_check():
-    # Micro and blind/buried vias end inside the board。
-    # both of their ends have to land on the net's copper 
+    # Micro and blind/buried vias end inside the board, so both of their ends
+    # have to land on the net's copper.
     for via_type in (ViaType.VT_MICRO, ViaType.VT_BLIND_BURIED):
         board, zones = _board(inner_layer=True)
         del zones[0].filled_polygons[BoardLayer.BL_In1_Cu]
