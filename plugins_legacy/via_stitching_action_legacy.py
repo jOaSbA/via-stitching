@@ -30,7 +30,7 @@ import _geometry_legacy as geo  # noqa: E402
 from _i18n_legacy import _  # noqa: E402
 from _kicad_config_legacy import kicad_config_dirs  # noqa: E402
 
-VERSION = "1.2.1"
+VERSION = "1.2.2"
 
 DEFAULT_NET = "GND"
 DEFAULT_VIA_DIAMETER_MM = 0.6
@@ -311,8 +311,14 @@ def stitch(board, via_type, start_layer, end_layer, net_name, via_dia_mm, drill_
         if r is not None:
             region_by_layer[layer] = r
 
+    # The via must land on the net's copper on the two layers it connects. A
+    # through via is the exception: its barrel crosses every layer, so any two
+    # poured layers in the span give it something to stitch, whether or not
+    # they are the outer ones. One poured layer is not enough, that would only
+    # place vias DRC reports as dangling.
     missing = [l for l in (start_layer, end_layer) if l not in region_by_layer]
-    if missing:
+    poured = [l for l in span if l in region_by_layer]
+    if missing and not (via_type == pcbnew.VIATYPE_THROUGH and len(poured) >= 2):
         names = ", ".join(board.GetLayerName(l) for l in missing)
         raise RuntimeError(
             _(
@@ -322,10 +328,13 @@ def stitch(board, via_type, start_layer, end_layer, net_name, via_dia_mm, drill_
             ).format(net=net_name, layers=names)
         )
 
-    region = region_by_layer[start_layer].intersection(region_by_layer[end_layer])
-    for layer in span:
-        if layer in region_by_layer and layer not in (start_layer, end_layer):
-            region = region.intersection(region_by_layer[layer])
+    # Keep the via on the net's copper on every poured layer it passes, since
+    # the barrel connects all of them. Layers in the span where the net is NOT
+    # poured are left to DRC: the barrel passing through another net's copper
+    # there is not checked here.
+    region = region_by_layer[poured[0]]
+    for layer in poured[1:]:
+        region = region.intersection(region_by_layer[layer])
 
     if region.is_empty:
         raise RuntimeError(_("The selected net's planes do not overlap anywhere on the selected layer span."))

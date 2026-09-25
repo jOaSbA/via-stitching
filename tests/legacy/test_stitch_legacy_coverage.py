@@ -45,13 +45,15 @@ def _square_polyset(x0, y0, x1, y1):
     return ps
 
 
-def _board(layers, size=10 * MM):
+def _board(layers, size=10 * MM, poured=None):
+    """A square GND pour on every copper layer, or on `poured` only, for the
+    copper-check tests that need some layers left unpoured."""
     board = pcbnew.BOARD()
     board.SetCopperLayerCount(layers)
     gnd = pcbnew.NETINFO_ITEM(board, "GND")
     board.Add(gnd)
     layer_ids = [pcbnew.F_Cu, pcbnew.B_Cu] if layers == 2 else [pcbnew.F_Cu, pcbnew.In1_Cu, pcbnew.B_Cu]
-    for layer in layer_ids:
+    for layer in layer_ids if poured is None else poured:
         z = pcbnew.ZONE(board)
         z.SetNet(gnd)
         z.SetLayer(layer)
@@ -77,6 +79,59 @@ def test_via_types_and_spans():
         assert placed > 0
         assert all(v.GetViaType() == via_type for v in vias)
         assert all(v.TopLayer() == top and v.BottomLayer() == bottom for v in vias)
+
+
+def _stitch_through(board):
+    return vsl.stitch(
+        board, pcbnew.VIATYPE_THROUGH, pcbnew.F_Cu, pcbnew.B_Cu, "GND",
+        via_dia_mm=0.6, drill_mm=0.3, spacing_mm=2.0, pattern="Square",
+        x_offset_mm=0, y_offset_mm=0,
+    )
+
+
+def test_through_via_needs_two_poured_layers_not_both_ends():
+    # The barrel crosses every layer, so a through via can stitch any two
+    # layers the net is poured on: here the back is unpoured, and on the
+    # four-layer board neither outer layer is, the usual inner-plane stackup.
+    for layers, poured in ((3, [pcbnew.F_Cu, pcbnew.In1_Cu]), (4, [pcbnew.In1_Cu, pcbnew.In2_Cu])):
+        board, _ = _board(layers=layers, poured=poured)
+        placed, _ = _stitch_through(board)
+        vias = [t for t in board.GetTracks() if isinstance(t, pcbnew.PCB_VIA)]
+        assert placed > 0 and len(vias) == placed, (layers, placed)
+
+
+def test_through_via_on_one_poured_layer_fails():
+    # One poured layer gives the via nothing to stitch it to, so every via
+    # would be dangling. The error names the unpoured ends.
+    for layers, poured, named in (
+        (2, [pcbnew.F_Cu], ["B.Cu"]),
+        (3, [pcbnew.In1_Cu], ["F.Cu", "B.Cu"]),
+    ):
+        board, _ = _board(layers=layers, poured=poured)
+        try:
+            _stitch_through(board)
+        except RuntimeError as exc:
+            assert all(n in str(exc) for n in named), exc
+        else:
+            raise AssertionError(f"one poured layer should have failed ({named})")
+
+
+def test_only_through_vias_are_exempt_from_the_copper_check():
+    # Micro and blind/buried vias end inside the board, so both of their ends
+    # have to land on the net's copper -- the exemption is the through via's
+    # alone.
+    for via_type in (pcbnew.VIATYPE_MICROVIA, pcbnew.VIATYPE_BLIND_BURIED):
+        board, _ = _board(layers=3, poured=[pcbnew.F_Cu, pcbnew.B_Cu])
+        try:
+            vsl.stitch(
+                board, via_type, pcbnew.F_Cu, pcbnew.In1_Cu, "GND",
+                via_dia_mm=0.25, drill_mm=0.1, spacing_mm=1.0, pattern="Square",
+                x_offset_mm=0, y_offset_mm=0,
+            )
+        except RuntimeError as exc:
+            assert "In1.Cu" in str(exc), exc
+        else:
+            raise AssertionError(f"{via_type} must still land on copper at both ends")
 
 
 def test_all_patterns_place_something():
@@ -200,6 +255,9 @@ def test_avoid_same_net_pads_toggle():
 def run():
     tests = [
         test_via_types_and_spans,
+        test_through_via_needs_two_poured_layers_not_both_ends,
+        test_through_via_on_one_poured_layer_fails,
+        test_only_through_vias_are_exempt_from_the_copper_check,
         test_all_patterns_place_something,
         test_via_count_warn_prompt,
         test_avoid_other_zones_toggle,

@@ -164,6 +164,7 @@ The dialog follows whatever language KiCad itself is configured to show
 - Dutch
 - German
 - French
+- Chinese (Simplified)
 
 Anything without a catalog falls back to English. Catalogs live in
 `plugins/locale/`, keyed by the English source strings, and are shared by both
