@@ -817,17 +817,14 @@ def stitch(
 
     span = _span_layers(board, start_layer, end_layer)
 
-    # The via must land on the net's copper on the two layers it connects.
-    # through via is the exception.
+    # The via must land on the net's copper on the two layers it connects. A
+    # through via is the exception: its barrel crosses every layer, so any two
+    # poured layers in the span give it something to stitch, whether or not
+    # they are the outer ones. One poured layer is not enough, that would only
+    # place vias DRC reports as dangling.
     missing = [l for l in (start_layer, end_layer) if l not in regions]
-    poured = [l for l in (start_layer, end_layer) if l in regions]
-    is_through = via_type == ViaType.VT_THROUGH
-
-    if is_through and poured:
-        region = regions[poured[0]]
-        if len(poured) == 2:
-            region = region.intersection(regions[poured[1]])
-    elif missing:
+    poured = [l for l in span if l in regions]
+    if missing and not (via_type == ViaType.VT_THROUGH and len(poured) >= 2):
         names = ", ".join(board.get_layer_name(l) for l in missing)
         raise RuntimeError(
             _(
@@ -836,16 +833,14 @@ def stitch(
                 "first (press B in the PCB editor)."
             ).format(net=net_name, layers=names)
         )
-    else:
-        region = regions[start_layer].intersection(regions[end_layer])
 
-    # Intermediate layers inside the span: where this net is poured there too,
-    # keep the via on that copper (the barrel connects those layers as well).
-    # Layers in the span where the net is NOT poured are left to DRC: the barrel
-    # passing through another net's copper there is not checked here.
-    for layer in span:
-        if layer in regions and layer not in (start_layer, end_layer):
-            region = region.intersection(regions[layer])
+    # Keep the via on the net's copper on every poured layer it passes, since
+    # the barrel connects all of them. Layers in the span where the net is NOT
+    # poured are left to DRC: the barrel passing through another net's copper
+    # there is not checked here.
+    region = regions[poured[0]]
+    for layer in poured[1:]:
+        region = region.intersection(regions[layer])
 
     if region.is_empty:
         raise RuntimeError(
