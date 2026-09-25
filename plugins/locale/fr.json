@@ -58,6 +58,7 @@
   "Via Stitching Parameters": "Paramètres de Via Stitching",
   "Via Stitching failed while placing vias.": "Via Stitching a échoué pendant le placement des vias.",
   "Via Stitching hit an unexpected error.": "Via Stitching a rencontré une erreur inattendue.",
+  "Via Stitching needs the shapely Python package, which KiCad does not ship.\n\nLinux: sudo apt install python3-shapely\nWindows: \"C:/Program Files/KiCad/<version>/bin/python.exe\" -m pip install shapely\n\nThen restart KiCad.": "Via Stitching a besoin du paquet Python shapely, que KiCad ne fournit pas.\n\nLinux: sudo apt install python3-shapely\nWindows: \"C:/Program Files/KiCad/<version>/bin/python.exe\" -m pip install shapely\n\nRedémarrez ensuite KiCad.",
   "Via Type:": "Type de via :",
   "Via diameter, drill and spacing and offsets must be numbers (mm).": "Le diamètre de via, le perçage, l'espacement et les décalages doivent être des nombres (mm).",
   "Via diameter, drill and spacing must all be greater than zero.": "Le diamètre de via, le perçage et l'espacement doivent tous être supérieurs à zéro.",

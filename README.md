@@ -24,6 +24,9 @@ On KiCad 6 to 9:
 - `shapely`. KiCad ships wxPython itself but not shapely, so install it into
   KiCad's own Python if the plugin reports it missing. On Windows that is
   `"C:/Program Files/KiCad/<version>/bin/python.exe" -m pip install shapely`.
+  On Linux KiCad uses the system Python, so install it from your package
+  manager: `sudo apt install python3-shapely` on Debian and Ubuntu. The
+  Flatpak build of KiCad has not been tested.
 
 ## Install
 

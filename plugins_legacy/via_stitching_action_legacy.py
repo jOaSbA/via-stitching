@@ -431,6 +431,18 @@ class ViaStitchingLegacy(pcbnew.ActionPlugin):
         board = pcbnew.GetBoard()
         parent = _pcb_frame()
         try:
+            import shapely  # noqa: F401
+        except ImportError:
+            wx.MessageBox(
+                _("Via Stitching needs the shapely Python package, which KiCad "
+                  "does not ship.\n\n"
+                  "Linux: sudo apt install python3-shapely\n"
+                  "Windows: \"C:/Program Files/KiCad/<version>/bin/python.exe\" "
+                  "-m pip install shapely\n\n"
+                  "Then restart KiCad."),
+                _("Via Stitching"), wx.OK | wx.ICON_ERROR, parent)
+            return
+        try:
             dlg = ViaStitchingDialogLegacy(parent, board)
             try:
                 if dlg.ShowModal() != wx.ID_OK:
