@@ -23,7 +23,7 @@ _LANGUAGE_TO_CODE = {
     "Deutsch": "de",
     "French": "fr",
     "Français": "fr",
-    "Chinese": "zh",
+    "简体中文": "zh",
 }
 
 _CATALOG_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "locale")
