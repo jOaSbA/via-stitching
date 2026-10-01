@@ -20,14 +20,21 @@ import os
 import re
 import sys
 import traceback
+from collections import namedtuple
 
 import pcbnew
 import wx
 import wx.adv
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+# _preview.py is shared with the IPC build. build.py packages it next to this
+# file; in a source checkout it is one directory over. Appended, not inserted,
+# so nothing in plugins/ can shadow a module of this build's own.
+if not os.path.exists(os.path.join(os.path.dirname(os.path.abspath(__file__)), "_preview.py")):
+    sys.path.append(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "plugins"))
 import _geometry_legacy as geo  # noqa: E402
 from _i18n_legacy import _  # noqa: E402
+from _preview import PreviewPanel  # noqa: E402
 from _kicad_config_legacy import kicad_config_dirs  # noqa: E402
 
 VERSION = "1.2.2"
@@ -278,11 +285,20 @@ def _blocked_predicate(shapes):
     return lambda x, y: len(tree.query(Point(x, y), predicate="intersects")) > 0
 
 
-def stitch(board, via_type, start_layer, end_layer, net_name, via_dia_mm, drill_mm,
-           spacing_mm, pattern, x_offset_mm, y_offset_mm,
-           avoid_other_zones=False, avoid_footprints=False, avoid_same_net_pads=False,
-           parent=None):
-    """Run the stitching. Returns (vias placed, whether they were grouped)."""
+# What plan() works out, before anything touches the board. `region` is the
+# net's copper overlap being stitched, `candidates` the grid positions inside
+# it, `points` where the vias actually go: a point not in `candidates` was
+# nudged off a blocked grid position. `layers` is each poured layer in the
+# via's span with its own copper, front to back, which is what the preview
+# draws: the overlap alone hides which layers it came from.
+Plan = namedtuple("Plan", "points candidates region net layers")
+
+
+def plan(board, via_type, start_layer, end_layer, net_name, via_dia_mm, drill_mm,
+         spacing_mm, pattern, x_offset_mm, y_offset_mm,
+         avoid_other_zones=False, avoid_footprints=False, avoid_same_net_pads=False):
+    """Where the vias would go, without placing any. Raises RuntimeError with a
+    user-facing message when nothing can go anywhere."""
     from shapely.geometry import Point
     from shapely.prepared import prep
 
@@ -340,6 +356,7 @@ def stitch(board, via_type, start_layer, end_layer, net_name, via_dia_mm, drill_
         raise RuntimeError(_("The selected net's planes do not overlap anywhere on the selected layer span."))
 
     inset = via_radius_nm + _from_mm(EDGE_EPS_MM)
+    overlap = region
     region = region.buffer(-inset)
     if region.is_empty:
         raise RuntimeError(_("No room for vias after clearance inset. Try a smaller via diameter."))
@@ -387,6 +404,24 @@ def stitch(board, via_type, start_layer, end_layer, net_name, via_dia_mm, drill_
                 blockers=_("existing vias, pads, tracks or rule areas"),
             )
         )
+
+    layers = [(l, region_by_layer[l]) for l in poured]
+    return Plan(points, candidates, overlap, net, layers)
+
+
+def stitch(board, via_type, start_layer, end_layer, net_name, via_dia_mm, drill_mm,
+           spacing_mm, pattern, x_offset_mm, y_offset_mm,
+           avoid_other_zones=False, avoid_footprints=False, avoid_same_net_pads=False,
+           parent=None):
+    """Run the stitching. Returns (vias placed, whether they were grouped)."""
+    p = plan(
+        board, via_type, start_layer, end_layer, net_name, via_dia_mm, drill_mm,
+        spacing_mm, pattern, x_offset_mm, y_offset_mm,
+        avoid_other_zones, avoid_footprints, avoid_same_net_pads,
+    )
+    points, net = p.points, p.net
+    diameter_nm = _from_mm(via_dia_mm)
+    drill_nm = _from_mm(drill_mm)
 
     if len(points) > VIA_COUNT_WARN:
         msg = _(
@@ -542,7 +577,7 @@ class ViaStitchingDialogLegacy(wx.Dialog):
         super().__init__(
             parent,
             title=_("Via Stitching Parameters"),
-            style=wx.DEFAULT_DIALOG_STYLE | wx.STAY_ON_TOP,
+            style=wx.DEFAULT_DIALOG_STYLE | wx.RESIZE_BORDER | wx.STAY_ON_TOP,
         )
         self.board = board
         self.VIA_TYPE_NAMES = {v: k for k, v in self.VIA_TYPE_CHOICES.items()}
@@ -570,7 +605,7 @@ class ViaStitchingDialogLegacy(wx.Dialog):
             self.via_type.SetStringSelection(saved["via_type_name"])
         else:
             self.via_type.SetSelection(0)
-        self.via_type.Bind(wx.EVT_CHOICE, lambda evt: self._on_via_type())
+        self.via_type.Bind(wx.EVT_CHOICE, lambda evt: (self._on_via_type(), evt.Skip()))
 
         # --- Layers, with color swatches ---
         def _layer_combo():
@@ -595,8 +630,8 @@ class ViaStitchingDialogLegacy(wx.Dialog):
                 layer_order.index(self.layer_map[end_name]) if end_name in self.layer_map
                 else len(layer_order) - 1
             )
-        self.start_layer.Bind(wx.EVT_COMBOBOX, lambda evt: self._on_start_layer())
-        self.end_layer.Bind(wx.EVT_COMBOBOX, lambda evt: self._update_advisory())
+        self.start_layer.Bind(wx.EVT_COMBOBOX, lambda evt: (self._on_start_layer(), evt.Skip()))
+        self.end_layer.Bind(wx.EVT_COMBOBOX, lambda evt: (self._update_advisory(), evt.Skip()))
 
         # --- Size fields ---
         if sample_via:
@@ -735,17 +770,46 @@ class ViaStitchingDialogLegacy(wx.Dialog):
         button_row.AddStretchSpacer(1)
         button_row.Add(buttons, 0, wx.EXPAND)
 
-        self.main_sizer.AddSpacer(10)
-        self.main_sizer.Add(button_row, 0, wx.EXPAND)
+        # Settings on the left, the live preview of them on the right.
+        self.preview = PreviewPanel(self, self._preview_plan, _)
+        columns = wx.BoxSizer(wx.HORIZONTAL)
+        columns.Add(self.main_sizer, 0, wx.EXPAND)
+        columns.Add(self.preview, 1, wx.EXPAND | wx.LEFT | wx.TOP, 5)
 
         outer = wx.BoxSizer(wx.VERTICAL)
-        outer.Add(self.main_sizer, 1, wx.EXPAND | wx.ALL, 8)
+        outer.Add(columns, 1, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.TOP, 8)
+        outer.AddSpacer(10)
+        outer.Add(button_row, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, 8)
         self.SetSizerAndFit(outer)
         self.Layout()
         self.CenterOnParent()
 
         self._refresh_layer_controls()
         self._update_advisory()
+
+        # Every setting reaches the preview through these. Bound last, so the
+        # controls being filled in above don't each queue an update. The three
+        # controls with handlers of their own pass the event on with Skip().
+        for event in (wx.EVT_TEXT, wx.EVT_CHOICE, wx.EVT_COMBOBOX, wx.EVT_CHECKBOX):
+            self.Bind(event, self._on_setting_changed)
+        self.preview.schedule()
+
+    def _preview_plan(self):
+        """What the preview panel draws: the plan for the current settings.
+        OK still has stitch() plan again from the board as it is then, so an
+        edit to the board after the last preview never places stale vias."""
+        params = self.values()
+        p = plan(self.board, **params)
+        styles = {
+            layer: (self.layer_names.get(layer, str(layer)),
+                    self._layer_colors.get(layer, (128, 128, 128)))
+            for layer, _copper in p.layers
+        }
+        return p, _from_mm(params["via_dia_mm"]), styles
+
+    def _on_setting_changed(self, evt):
+        self.preview.schedule()
+        evt.Skip()
 
     def _make_group(self, parent_sizer, rows):
         box = wx.StaticBoxSizer(wx.VERTICAL, self, "")
@@ -846,7 +910,11 @@ class ViaStitchingDialogLegacy(wx.Dialog):
             self.advisory_label.SetLabel("")
             self.advisory_label.Hide()
         self.main_sizer.Layout()
-        self.Fit()
+        # Grow to fit the advisory, never shrink: the dialog is resizable now,
+        # and a Fit() here would undo the user's own resize on every change.
+        best, size = self.GetSizer().ComputeFittingWindowSize(self), self.GetSize()
+        self.SetSize(max(best.width, size.width), max(best.height, size.height))
+        self.Layout()
 
     def _refresh_remove_run_btn(self):
         runs = stitching_runs(self.board)
@@ -895,6 +963,7 @@ class ViaStitchingDialogLegacy(wx.Dialog):
             _report(self, _("Removing the stitching run hit an unexpected error."),
                     traceback.format_exc())
         self._refresh_remove_run_btn()
+        self.preview.schedule()  # the removed vias no longer block anything
 
     def _on_reset(self):
         _clear_settings()

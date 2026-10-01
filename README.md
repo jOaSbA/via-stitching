@@ -9,7 +9,9 @@ Works on KiCad 6, 7, 8, 9, 10, and later. One package, two builds: the Plugin
 and Content Manager hands your KiCad the one it can run, and both have the same
 dialog. See [Two builds](#two-builds) if you want to know which one you have.
 
-![The Via Stitching parameters dialog](docs/dialog.png?v=3)
+![The Via Stitching parameters dialog, previewing through vias on a four-layer board](docs/dialog.png?v=4)
+
+<sub>Board: the Tiny Tapeout demo that ships with KiCad 10 (Apache-2.0).</sub>
 
 ## Requirements
 
@@ -80,6 +82,17 @@ and restart the PCB editor.
    grid position blocked by a pad or a track is moved a short way to the
    nearest clear spot rather than skipped, so the grid keeps its coverage
    beside pads instead of leaving a hole there.
+
+The right half of the dialog previews the run before anything is placed: the
+copper being stitched, every via at its real size, and in orange the ones moved
+off the grid to clear a pad or track. It redraws a moment after any setting
+changes, and keeps your zoom while the copper stays the same. Scroll to zoom,
+drag to pan, double-click to fit. On a large board, where each update can take
+a few seconds, untick **Update automatically** and use **Update preview**
+instead. A setting that can't be stitched (a drill wider than the via, a net
+with no copper) shows up there too, with the last good preview left in view.
+OK works the positions out again from the board, so editing the board after
+the last preview never places stale vias.
 
 The dialog remembers what you last set (via type, layers, size, pattern,
 offsets, net, and the avoid-* checkboxes) and pre-fills the next run with it,

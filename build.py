@@ -41,7 +41,8 @@ LAYOUTS = {
     # The string catalogs and the toolbar icon live with the IPC sources and
     # ship in both packages, rather than as a second copy that can drift.
     "swig": {"plugins_legacy": "plugins", "plugins/locale": "plugins/locale",
-             "plugins/icon.png": "plugins/icon.png", "resources": "resources"},
+             "plugins/icon.png": "plugins/icon.png",
+             "plugins/_preview.py": "plugins/_preview.py", "resources": "resources"},
 }
 # Never ship these.
 EXCLUDE_NAMES = {"__pycache__", ".DS_Store"}
