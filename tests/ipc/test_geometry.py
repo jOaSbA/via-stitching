@@ -737,16 +737,17 @@ def test_translation_catalogs_cover_every_wrapped_string():
     import ast
     import json
 
-    source_path = os.path.join(os.path.dirname(_i18n.__file__), "via_stitching_action.py")
-    with open(source_path, encoding="utf-8") as fh:
-        tree = ast.parse(fh.read())
-    wrapped = {
-        node.args[0].value
-        for node in ast.walk(tree)
-        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
-        and node.func.id == "_" and node.args
-        and isinstance(node.args[0], ast.Constant)
-    }
+    wrapped = set()
+    for name in ("via_stitching_action.py", "_preview.py"):
+        with open(os.path.join(os.path.dirname(_i18n.__file__), name), encoding="utf-8") as fh:
+            tree = ast.parse(fh.read())
+        wrapped |= {
+            node.args[0].value
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+            and node.func.id == "_" and node.args
+            and isinstance(node.args[0], ast.Constant)
+        }
     assert len(wrapped) > 40, "expected the dialog and messages to be wrapped"
 
     for code in ("nl", "de", "fr"):

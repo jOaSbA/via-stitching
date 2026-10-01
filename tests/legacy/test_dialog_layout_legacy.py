@@ -169,7 +169,8 @@ def test_dialog_has_a_sane_minimum_size():
     vsl._clear_settings()
     dlg = vsl.ViaStitchingDialogLegacy(None, board)
     size = dlg.GetSize()
-    assert 200 < size.width < 800, f"dialog width {size.width} looks unreasonable"
+    # Settings plus the preview beside them, so wider than a plain form.
+    assert 600 < size.width < 1200, f"dialog width {size.width} looks unreasonable"
     assert 300 < size.height < 900, f"dialog height {size.height} looks unreasonable"
     dlg.Destroy()
     vsl._clear_settings()

@@ -241,6 +241,22 @@ def test_the_run_is_grouped_under_one_readable_name():
     assert len(groups[0].items) == count
 
 
+def test_plan_touches_nothing_and_matches_what_stitch_places():
+    # plan() is what a preview draws, so it must leave the board alone and
+    # agree with stitch() to the nanometre.
+    board, _ = _board()
+    p = vs.plan(board, ViaType.VT_THROUGH, BoardLayer.BL_F_Cu, BoardLayer.BL_B_Cu,
+                "GND", 0.6, 0.3, 2.0, "Square", 0.0, 0.0)
+    assert board.placed == []
+    assert p.points and not p.region.is_empty
+    # No blockers on this board, so every via sits exactly on the grid.
+    assert set(p.points) <= set(p.candidates)
+
+    count, _grouped = _run(board)
+    assert count == len(p.points)
+    assert sorted((v.position.x, v.position.y) for v in _vias(board)) == sorted(p.points)
+
+
 if __name__ == "__main__":
     for name, fn in sorted(globals().items()):
         if name.startswith("test_"):

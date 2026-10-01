@@ -252,6 +252,26 @@ def test_avoid_same_net_pads_toggle():
     assert placed_on < placed_off
 
 
+def test_plan_touches_nothing_and_matches_what_stitch_places():
+    # plan() is what a preview draws, so it must leave the board alone and
+    # agree with stitch() to the nanometre.
+    board, _ = _board(layers=2)
+    p = vsl.plan(
+        board, pcbnew.VIATYPE_THROUGH, pcbnew.F_Cu, pcbnew.B_Cu, "GND",
+        via_dia_mm=0.6, drill_mm=0.3, spacing_mm=2.0, pattern="Square",
+        x_offset_mm=0, y_offset_mm=0,
+    )
+    assert not any(isinstance(t, pcbnew.PCB_VIA) for t in board.GetTracks())
+    assert p.points and not p.region.is_empty
+    # No blockers on this board, so every via sits exactly on the grid.
+    assert set(p.points) <= set(p.candidates)
+
+    placed, _ = _stitch_through(board)
+    vias = [t for t in board.GetTracks() if isinstance(t, pcbnew.PCB_VIA)]
+    assert placed == len(p.points)
+    assert sorted((v.GetPosition().x, v.GetPosition().y) for v in vias) == sorted(p.points)
+
+
 def run():
     tests = [
         test_via_types_and_spans,
@@ -263,6 +283,7 @@ def run():
         test_avoid_other_zones_toggle,
         test_avoid_footprints_toggle,
         test_avoid_same_net_pads_toggle,
+        test_plan_touches_nothing_and_matches_what_stitch_places,
     ]
     for test in tests:
         test()
