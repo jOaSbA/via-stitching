@@ -52,7 +52,7 @@ from _kicad_config import kicad_config_dirs  # noqa: E402
 from _i18n import _  # noqa: E402
 from _preview import PreviewPanel  # noqa: E402
 
-VERSION = "3.0.3"
+VERSION = "4.0.0"
 
 # shapely (plus the numpy and GEOS it drags in) costs the better part of a second
 # to import, more than the rest of start-up together, so the geometry functions

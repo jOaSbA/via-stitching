@@ -37,7 +37,7 @@ from _i18n_legacy import _  # noqa: E402
 from _preview import PreviewPanel  # noqa: E402
 from _kicad_config_legacy import kicad_config_dirs  # noqa: E402
 
-VERSION = "1.2.2"
+VERSION = "1.3.0"
 
 DEFAULT_NET = "GND"
 DEFAULT_VIA_DIAMETER_MM = 0.6
