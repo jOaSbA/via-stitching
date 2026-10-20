@@ -293,6 +293,27 @@ def test_missing_shapely_is_reported_before_the_dialog_opens():
     assert len(shown) == 1 and "python3-shapely" in shown[0], shown
 
 
+def test_resolve_net_name():
+    # Issue #17: hierarchical nets carry their sheet path, so the short name
+    # has to find them too.
+    names = ["/Battery Management/STACK+", "/Sheet A/VCC", "/Sheet B/VCC", "GND", "Net-(R1-Pad1)"]
+    assert vsl._resolve_net_name("GND", names) == "GND"
+    assert vsl._resolve_net_name("gnd", names) == "GND"
+    assert vsl._resolve_net_name("STACK+", names) == "/Battery Management/STACK+"
+    assert vsl._resolve_net_name("stack+", names) == "/Battery Management/STACK+"
+    assert vsl._resolve_net_name("Battery", names) == "/Battery Management/STACK+"
+    assert vsl._resolve_net_name("R1", names) == "Net-(R1-Pad1)"
+    # An exact name beats a looser match on another net.
+    assert vsl._resolve_net_name("VCC", ["VCC", "/Sheet A/VCC"]) == "VCC"
+    for typed, needle in (("VCC", "more than one net"), ("NOPE", "No net")):
+        try:
+            vsl._resolve_net_name(typed, names)
+        except ValueError as exc:
+            assert needle in str(exc), exc
+        else:
+            raise AssertionError(f"{typed!r} resolved")
+
+
 def run():
     tests =[v for k, v in sorted(globals().items()) if k.startswith("test_")]
     for test in tests:

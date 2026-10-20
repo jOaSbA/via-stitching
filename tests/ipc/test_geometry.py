@@ -27,6 +27,7 @@ from via_stitching_action import (  # noqa: E402
     _nudge_radius,
     _nudged,
     _pad_copper_keepout_shapes,
+    _resolve_net_name,
     _rule_area_keepout_shapes,
     _track_keepout_shapes,
     _zone_keepout_shapes,
@@ -1051,6 +1052,27 @@ def test_nudged_finds_a_spot_beside_a_keepout():
 
     # No slack in the grid: nothing moves.
     assert _nudged(here[0], here[1], 0, allowed, small) is None
+
+
+def test_resolve_net_name():
+    # Issue #17: hierarchical nets carry their sheet path, so the short name
+    # has to find them too.
+    names = ["/Battery Management/STACK+", "/Sheet A/VCC", "/Sheet B/VCC", "GND", "Net-(R1-Pad1)"]
+    assert _resolve_net_name("GND", names) == "GND"
+    assert _resolve_net_name("gnd", names) == "GND"
+    assert _resolve_net_name("STACK+", names) == "/Battery Management/STACK+"
+    assert _resolve_net_name("stack+", names) == "/Battery Management/STACK+"
+    assert _resolve_net_name("Battery", names) == "/Battery Management/STACK+"
+    assert _resolve_net_name("R1", names) == "Net-(R1-Pad1)"
+    # An exact name beats a looser match on another net.
+    assert _resolve_net_name("VCC", ["VCC", "/Sheet A/VCC"]) == "VCC"
+    for typed, needle in (("VCC", "more than one net"), ("NOPE", "No net")):
+        try:
+            _resolve_net_name(typed, names)
+        except ValueError as exc:
+            assert needle in str(exc), exc
+        else:
+            raise AssertionError(f"{typed!r} resolved")
 
 
 if __name__ == "__main__":
