@@ -18,7 +18,8 @@ layers you pick. Works on KiCad 6, 7, 8, 9, 10, and later.
 
 1. Fill the zones (`B`) so the pours have copper to read. "No filled copper
    for net ..." means this step was skipped.
-2. Run Via Stitching, pick the net (`GND` by default) and the via size.
+2. Run Via Stitching from its button on the PCB editor's top toolbar, then
+   pick the net (`GND` by default) and the via size.
 3. Check the preview and click OK. The zones are refilled for you.
 
 ## Install
@@ -147,6 +148,10 @@ Pads on other nets are avoided either way, with their full clearance.
 - The KiCad 10 build needs the IPC API server (see
   [Requirements](#requirements)). Without it the plugin can only tell you to
   switch it on.
+- On KiCad 10 and later the plugin has only its toolbar button, no entry
+  under *Tools > External Plugins*. KiCad lists only the older SWIG plugins
+  there, and plugins on the new API have no way to add one. The KiCad 6 to 9
+  build shows up in that menu as usual.
 - On a large board each preview update can take a few seconds, and the dialog
   waits for it. Untick **Update automatically** and use **Update preview** to
   redraw only when you ask.
