@@ -162,6 +162,35 @@ def _clear_settings():
         pass
 
 
+def _resolve_net_name(typed, names):
+    """Map what was typed in the net field to one of the board's net names.
+
+    An exact name wins. Otherwise, ignoring case: the whole name, then the last
+    sheet segment of a hierarchical net ("STACK+" for
+    "/Battery Management/STACK+"), then any part of the name. Each step only
+    picks a net when exactly one matches, so "GND" never silently means
+    "/Sheet A/GND" when "/Sheet B/GND" exists too.
+    """
+    if typed in names:
+        return typed
+    key = typed.casefold()
+    for matches in (
+        [n for n in names if n.casefold() == key],
+        [n for n in names if n.rsplit("/", 1)[-1].casefold() == key],
+        [n for n in names if key in n.casefold()],
+    ):
+        if len(matches) == 1:
+            return matches[0]
+        if matches:
+            shown = ", ".join(matches[:5]) + (", ..." if len(matches) > 5 else "")
+            raise ValueError(
+                _("'{typed}' matches more than one net: {nets}. Type more of the name.").format(
+                    typed=typed, nets=shown
+                )
+            )
+    raise ValueError(_("No net on the board matches '{typed}'.").format(typed=typed))
+
+
 # KiCad default theme copper colors (fallback)
 _DEFAULT_COPPER = {
     "f": (200, 52, 52), "in1": (127, 200, 127), "in2": (206, 125, 66),
@@ -1594,6 +1623,7 @@ class ViaStitchingDialog(wx.Dialog):
         net_name = self.net.GetValue().strip()
         if not net_name:
             raise ValueError(_("Pick the net to stitch."))
+        net_name = _resolve_net_name(net_name, self.net.GetStrings())
 
         return {
             "via_type": via_type,

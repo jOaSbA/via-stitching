@@ -1,4 +1,5 @@
 {
+  "'{typed}' matches more than one net: {nets}. Type more of the name.": "'{typed}' correspond à plusieurs nets : {nets}. Saisissez une plus grande partie du nom.",
   "All {count} candidate positions are blocked by {blockers}.\nIf these zones are already stitched, delete the previous vias first, or try a smaller spacing.": "Les {count} positions candidates sont toutes bloquées par {blockers}.\nSi ces zones sont déjà stitchées, supprimez d'abord les vias précédentes, ou essayez un espacement plus petit.",
   "Another KiCad instance owns the plugin API.\n\nKiCad serves the API on a single socket, and whichever instance started first holds it. This plugin was launched from a different one, so the instance that answered refused the request as coming from elsewhere.\n\nClose the other KiCad windows, then reopen the board you want to stitch and run this again. A KiCad only claims the socket while it is starting up, so the instance you keep has to be restarted, not just left open.": "Une autre instance de KiCad détient l'API du plugin.\n\nKiCad ne sert l'API que sur un seul socket, conservé par l'instance démarrée en premier. Ce plugin a été lancé depuis une autre instance, donc l'instance qui a répondu a refusé la requête comme venant d'ailleurs.\n\nFermez les autres fenêtres KiCad, rouvrez la carte à stitcher et réessayez. KiCad ne réclame le socket qu'au démarrage, donc l'instance conservée doit être redémarrée, pas seulement laissée ouverte.",
   "Avoid": "Éviter",
@@ -26,6 +27,7 @@
   "Net '{net}' not found on the board.": "Net '{net}' introuvable sur la carte.",
   "Net Name:": "Nom du net :",
   "No filled copper found for net '{net}'.\nFill the zones first (press B in the PCB editor), then run again.": "Aucun cuivre rempli trouvé pour le net '{net}'.\nRemplissez d'abord les zones (touche B dans l'éditeur de circuit imprimé), puis réessayez.",
+  "No net on the board matches '{typed}'.": "Aucun net de la carte ne correspond à '{typed}'.",
   "No room for vias after clearance inset. Try a smaller via diameter.": "Plus de place pour des vias après la marge de dégagement. Essayez un diamètre de via plus petit.",
   "No stitching run on this board": "Aucune passe de stitching sur cette carte",
   "No via positions fit inside the overlap of the planes.\nTry a smaller spacing or via diameter.": "Aucune position de via ne tient dans le chevauchement des plans.\nEssayez un espacement ou un diamètre de via plus petit.",

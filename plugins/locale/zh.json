@@ -1,4 +1,5 @@
 {
+  "'{typed}' matches more than one net: {nets}. Type more of the name.": "“{typed}”匹配多个网络：{nets}。请输入更完整的名称。",
   "All {count} candidate positions are blocked by {blockers}.\nIf these zones are already stitched, delete the previous vias first, or try a smaller spacing.": "所有 {count} 个候选位置都被 {blockers} 阻挡。\n如果这些区域已经打过缝合孔，请先删除之前的过孔，或尝试更小的间距。",
   "Another KiCad instance owns the plugin API.\n\nKiCad serves the API on a single socket, and whichever instance started first holds it. This plugin was launched from a different one, so the instance that answered refused the request as coming from elsewhere.\n\nClose the other KiCad windows, then reopen the board you want to stitch and run this again. A KiCad only claims the socket while it is starting up, so the instance you keep has to be restarted, not just left open.": "另一个 KiCad 实例占用了插件 API。\n\nKiCad 只在一个 socket 上提供 API，由最先启动的实例持有。此插件是从另一个实例启动的，所以响应的实例把这个请求当作来自别处而拒绝了。\n\n关闭其他 KiCad 窗口，然后重新打开要缝合的板子并再次运行。KiCad 只在启动时占用 socket，所以保留的那个实例必须重新启动，仅保持打开是不够的。",
   "Avoid": "避开",
@@ -26,6 +27,7 @@
   "Net '{net}' not found on the board.": "板上未找到网络“{net}”。",
   "Net Name:": "网络名称：",
   "No filled copper found for net '{net}'.\nFill the zones first (press B in the PCB editor), then run again.": "未找到网络“{net}”的填充铜皮。\n请先填充区域（在 PCB 编辑器中按 B），然后再次运行。",
+  "No net on the board matches '{typed}'.": "板上没有与“{typed}”匹配的网络。",
   "No room for vias after clearance inset. Try a smaller via diameter.": "在间隙内缩后没有空间放置过孔。请尝试更小的过孔直径。",
   "No stitching run on this board": "此板上没有缝合运行记录",
   "No via positions fit inside the overlap of the planes.\nTry a smaller spacing or via diameter.": "没有过孔位置能放入平面的重叠区域内。\n请尝试更小的间距或过孔直径。",

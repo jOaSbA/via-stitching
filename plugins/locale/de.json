@@ -1,4 +1,5 @@
 {
+  "'{typed}' matches more than one net: {nets}. Type more of the name.": "'{typed}' passt zu mehr als einem Netz: {nets}. Geben Sie mehr vom Namen ein.",
   "All {count} candidate positions are blocked by {blockers}.\nIf these zones are already stitched, delete the previous vias first, or try a smaller spacing.": "Alle {count} Kandidatenpositionen werden blockiert durch {blockers}.\nWenn diese Zonen bereits gestitcht sind, löschen Sie zuerst die vorherigen Vias oder versuchen Sie einen kleineren Abstand.",
   "Another KiCad instance owns the plugin API.\n\nKiCad serves the API on a single socket, and whichever instance started first holds it. This plugin was launched from a different one, so the instance that answered refused the request as coming from elsewhere.\n\nClose the other KiCad windows, then reopen the board you want to stitch and run this again. A KiCad only claims the socket while it is starting up, so the instance you keep has to be restarted, not just left open.": "Eine andere KiCad-Instanz belegt die Plugin-API.\n\nKiCad stellt die API über einen einzigen Socket bereit, den die zuerst gestartete Instanz behält. Dieses Plugin wurde von einer anderen Instanz gestartet, weshalb die antwortende Instanz die Anfrage als von woanders kommend abgelehnt hat.\n\nSchließen Sie die anderen KiCad-Fenster, öffnen Sie die zu stitchende Platine erneut und versuchen Sie es noch einmal. KiCad beansprucht den Socket nur beim Start, daher muss die verbleibende Instanz neu gestartet werden, nicht nur geöffnet bleiben.",
   "Avoid": "Meiden",
@@ -26,6 +27,7 @@
   "Net '{net}' not found on the board.": "Netz '{net}' auf der Platine nicht gefunden.",
   "Net Name:": "Netzname:",
   "No filled copper found for net '{net}'.\nFill the zones first (press B in the PCB editor), then run again.": "Kein gefülltes Kupfer für Netz '{net}' gefunden.\nFüllen Sie zuerst die Zonen (B im Leiterplatteneditor drücken) und versuchen Sie es erneut.",
+  "No net on the board matches '{typed}'.": "Kein Netz auf der Platine passt zu '{typed}'.",
   "No room for vias after clearance inset. Try a smaller via diameter.": "Nach dem Abstandseinzug ist kein Platz für Vias. Versuchen Sie einen kleineren Via-Durchmesser.",
   "No stitching run on this board": "Kein Stitching-Durchlauf auf dieser Platine",
   "No via positions fit inside the overlap of the planes.\nTry a smaller spacing or via diameter.": "Innerhalb der Überlappung der Flächen passt keine Via-Position.\nVersuchen Sie einen kleineren Abstand oder Via-Durchmesser.",

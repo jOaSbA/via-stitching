@@ -1,4 +1,5 @@
 {
+  "'{typed}' matches more than one net: {nets}. Type more of the name.": "'{typed}' past bij meer dan één net: {nets}. Typ meer van de naam.",
   "All {count} candidate positions are blocked by {blockers}.\nIf these zones are already stitched, delete the previous vias first, or try a smaller spacing.": "Alle {count} kandidaat-posities worden geblokkeerd door {blockers}.\nAls deze zones al gestitcht zijn, verwijder dan eerst de vorige vias, of probeer een kleinere afstand.",
   "Another KiCad instance owns the plugin API.\n\nKiCad serves the API on a single socket, and whichever instance started first holds it. This plugin was launched from a different one, so the instance that answered refused the request as coming from elsewhere.\n\nClose the other KiCad windows, then reopen the board you want to stitch and run this again. A KiCad only claims the socket while it is starting up, so the instance you keep has to be restarted, not just left open.": "Een andere KiCad-instantie heeft de plugin-API in gebruik.\n\nKiCad biedt de API via één socket aan, die wordt vastgehouden door de instantie die als eerste is gestart. Deze plugin is vanuit een andere instantie gestart, dus de instantie die antwoordde, heeft het verzoek geweigerd omdat het van elders kwam.\n\nSluit de andere KiCad-vensters, open het bord dat je wilt stitchen opnieuw en probeer het nogmaals. KiCad claimt de socket alleen tijdens het opstarten, dus de instantie die je aanhoudt moet herstart worden, niet alleen open blijven.",
   "Avoid": "Vermijd",
@@ -26,6 +27,7 @@
   "Net '{net}' not found on the board.": "Net '{net}' niet gevonden op het bord.",
   "Net Name:": "Netnaam:",
   "No filled copper found for net '{net}'.\nFill the zones first (press B in the PCB editor), then run again.": "Geen gevuld koper gevonden voor net '{net}'.\nVul eerst de zones (druk op B in de PCB-editor) en probeer het opnieuw.",
+  "No net on the board matches '{typed}'.": "Geen net op het bord past bij '{typed}'.",
   "No room for vias after clearance inset. Try a smaller via diameter.": "Geen ruimte voor vias na de clearance-inspringing. Probeer een kleinere via-diameter.",
   "No stitching run on this board": "Geen stitching-run op dit bord",
   "No via positions fit inside the overlap of the planes.\nTry a smaller spacing or via diameter.": "Geen via-posities passen binnen de overlap van de vlakken.\nProbeer een kleinere afstand of via-diameter.",
