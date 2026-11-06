@@ -18,7 +18,9 @@ layers you pick. Works on KiCad 6, 7, 8, 9, 10, and later.
 
 1. Fill the zones (`B`) so the pours have copper to read. "No filled copper
    for net ..." means this step was skipped.
-2. Run Via Stitching from its button on the PCB editor's top toolbar, then
+2. Run Via Stitching from its button
+   (<img src="plugins/icon@2x.png" width="24" alt="Via Stitching toolbar icon">)
+   on the PCB editor's top toolbar, then
    pick the net (`GND` by default) and the via size.
 3. Check the preview and click OK. The zones are refilled for you.
 
