@@ -37,13 +37,16 @@ DIST = os.path.join(HERE, "dist")
 # plugins_legacy/ so the two never collide in the repo, but it has to install as
 # plugins/ like any other action plugin.
 LAYOUTS = {
-    "ipc": {"plugins": "plugins", "resources": "resources"},
+    "ipc": {"plugins": "plugins", "docs/icon.png": "resources/icon.png"},
     # The string catalogs and the toolbar icon live with the IPC sources and
     # ship in both packages, rather than as a second copy that can drift.
     "swig": {"plugins_legacy": "plugins", "plugins/locale": "plugins/locale",
              "plugins/icon.png": "plugins/icon.png",
-             "plugins/_preview.py": "plugins/_preview.py", "resources": "resources"},
+             "plugins/_preview.py": "plugins/_preview.py",
+             "docs/icon.png": "resources/icon.png"},
 }
+# The package icon lives in docs/ with the README images, but the PCM only
+# looks for it at resources/icon.png inside the archive.
 # Never ship these.
 EXCLUDE_NAMES = {"__pycache__", ".DS_Store"}
 EXCLUDE_EXTS = (".pyc", ".pyo")
@@ -65,7 +68,11 @@ ZIP_CREATE_SYSTEM = 3
 
 def _write(zf, arcname, data):
     info = zipfile.ZipInfo(arcname, date_time=ZIP_EPOCH)
-    info.compress_type = zipfile.ZIP_DEFLATED
+    # Stored, not deflated: deflate's bytes depend on the zlib behind the
+    # Python that runs this (3.14 on Windows ships zlib-ng, which compresses
+    # differently), so a deflated archive only reproduces on some machines.
+    # The whole package is under 200 kB either way.
+    info.compress_type = zipfile.ZIP_STORED
     info.external_attr = 0o644 << 16
     info.create_system = ZIP_CREATE_SYSTEM
     zf.writestr(info, data)
@@ -127,7 +134,7 @@ def main():
     packaged["versions"] = [built]
 
     install_size = 0
-    with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
+    with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_STORED) as zf:
         for abs_path, arcname in sorted(_collect(LAYOUTS[runtime]), key=lambda p: p[1]):
             with open(abs_path, "rb") as fh:
                 _write(zf, arcname, fh.read())

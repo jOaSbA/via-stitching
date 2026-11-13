@@ -15,7 +15,13 @@ permissions:
   contents: write
 
 jobs:
+  # The SWIG suites need a real pcbnew, so they run on KiCad 6 to 9 here
+  # first. A failure on any of them stops the release.
+  legacy:
+    uses: ./.github/workflows/legacy-matrix.yml
+
   release:
+    needs: legacy
     runs-on: ubuntu-latest
     steps:
       - name: Check out tagged revision
@@ -42,8 +48,6 @@ jobs:
             -f https://extras.wxpython.org/wxPython4/extras/linux/gtk3/ubuntu-24.04/
           pip install -r plugins/requirements.txt
 
-      # The SWIG suites need a real pcbnew, so they run in legacy-matrix.yml,
-      # which this same tag triggers.
       - name: Run the IPC tests
         run: |
           for t in tests/ipc/test_*.py; do echo "== $t"; xvfb-run -a python "$t"; done

@@ -4,15 +4,14 @@
 # caught two silent layer-handling bugs on 9, so it runs before every release.
 #
 # Not on every push: it installs KiCad four times over. Trigger it by hand from
-# the Actions tab when plugins_legacy/ changes.
+# the Actions tab when plugins_legacy/ changes. release.yml calls it on every
+# tag and does not publish unless it passes.
 
 name: legacy-matrix
 
 on:
   workflow_dispatch:
-  push:
-    tags:
-      - "v*"
+  workflow_call:
 
 
 jobs:
