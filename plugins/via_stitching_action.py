@@ -39,7 +39,10 @@ from kipy.errors import ApiError, ConnectionError as KiCadConnectionError
 from kipy.proto.common import ApiStatusCode
 from kipy.proto.common.types import KiCadObjectType
 from kipy.proto.board.board_types_pb2 import BoardLayer as BL, PadStackShape, ViaType
-from kipy.board_types import Group, Via, ArcTrack, PadType, PSS_CIRCLE
+from kipy.board_types import (
+    Group, Via, ArcTrack, PadType, PSS_CIRCLE, Field,
+    BoardSegment, BoardArc, BoardCircle, BoardRectangle, BoardPolygon,
+)
 from kipy.geometry import Vector2
 from kipy.util.units import from_mm, to_mm
 from kipy.util.board_layer import iter_copper_layers
@@ -105,6 +108,10 @@ DEFAULT_AVOID_FOOTPRINTS = False
 # thermal pad is a normal use of stitching. Pads on *other* nets are always
 # avoided, that keepout is not optional.
 DEFAULT_AVOID_SAME_NET_PADS = False
+
+# Off by default: silkscreen over a via is clipped, not a DRC error, and a
+# dense board has silkscreen nearly everywhere.
+DEFAULT_AVOID_GRAPHICS = False
 
 # Safety margins applied silently (the dialog has no clearance field, by design).
 # The inset keeps a via at least (via_radius + EDGE_EPS) inside the fill on every
@@ -605,6 +612,76 @@ def _rule_area_keepout_shapes(zones, via_radius_nm, span):
     return shapes
 
 
+def _graphic_keepout_shapes(board, net_name, via_radius_nm, clearances, span):
+    """Clearance areas around lines, shapes and text where the via shows up:
+    the copper layers in its span, and the silkscreen on each outer side it
+    reaches. Footprint graphics count too, hidden fields do not."""
+    from shapely.geometry import LineString, Point, box as shapely_box
+    from shapely.ops import unary_union
+
+    margins = {layer: via_radius_nm + clearances[net_name] for layer in span}
+    if BL.BL_F_Cu in margins:
+        margins[BL.BL_F_SilkS] = via_radius_nm
+    if BL.BL_B_Cu in margins:
+        margins[BL.BL_B_SilkS] = via_radius_nm
+
+    graphics, texts = list(board.get_shapes()), list(board.get_text())
+    for footprint in board.get_footprints():
+        graphics += footprint.definition.shapes
+        for item in footprint.texts_and_fields:
+            if not isinstance(item, Field):
+                texts.append(item)
+            elif item.visible:
+                texts.append(item.text)
+
+    shapes = []
+    for g in graphics:
+        margin = margins.get(g.layer)
+        net = getattr(g, "net", None)
+        if margin is None or (net is not None and net.name == net_name):
+            continue
+        if isinstance(g, BoardSegment):
+            geom = LineString([(g.start.x, g.start.y), (g.end.x, g.end.y)])
+        elif isinstance(g, BoardArc):
+            geom = LineString(_arc_coords(
+                (g.start.x, g.start.y), (g.mid.x, g.mid.y), (g.end.x, g.end.y)))
+        elif isinstance(g, BoardCircle):
+            geom = Point(g.center.x, g.center.y).buffer(g.radius(), quad_segs=16)
+        elif isinstance(g, BoardRectangle):
+            geom = shapely_box(min(g.top_left.x, g.bottom_right.x),
+                               min(g.top_left.y, g.bottom_right.y),
+                               max(g.top_left.x, g.bottom_right.x),
+                               max(g.top_left.y, g.bottom_right.y))
+        elif isinstance(g, BoardPolygon):
+            geom = unary_union([p for p in map(_polygon_with_holes_to_shapely, g.polygons)
+                                if p is not None])
+        else:
+            # ponytail: a bezier is kept clear as its whole bounding box.
+            # Flatten the curve if that ever blocks too much.
+            bbox = g.bounding_box()
+            geom = LineString([(bbox.pos.x, bbox.pos.y),
+                               (bbox.pos.x + bbox.size.x, bbox.pos.y + bbox.size.y)]).envelope
+        if geom.is_empty:
+            continue
+        # An outline only blocks along its stroke, not across its inside.
+        if geom.geom_type != "LineString" and not g.attributes.fill.filled:
+            geom = geom.boundary
+        shapes.append(geom.buffer(margin + g.attributes.stroke.width // 2, quad_segs=8))
+
+    # Text has no outline to follow, so it is kept clear as its bounding box.
+    # One call per layer: KiCad drops items it has no box for, which would
+    # misalign boxes and margins in a single mixed call.
+    for layer, margin in margins.items():
+        on_layer = [t for t in texts if t.layer == layer]
+        if not on_layer:
+            continue
+        for bbox in board.get_item_bounding_box(on_layer):
+            shapes.append(shapely_box(
+                bbox.pos.x - margin, bbox.pos.y - margin,
+                bbox.pos.x + bbox.size.x + margin, bbox.pos.y + bbox.size.y + margin))
+    return shapes
+
+
 def _footprint_keepout_shapes(board, net_name, via_radius_nm, clearances):
     """Clearance areas around every footprint's bounding box.
 
@@ -915,7 +992,7 @@ def plan(
     board, via_type, start_layer, end_layer, net_name, via_dia_mm, drill_mm, spacing_mm,
     pattern, x_offset_mm, y_offset_mm,
     avoid_other_zones=DEFAULT_AVOID_OTHER_ZONES, avoid_footprints=DEFAULT_AVOID_FOOTPRINTS,
-    avoid_same_net_pads=DEFAULT_AVOID_SAME_NET_PADS):
+    avoid_same_net_pads=DEFAULT_AVOID_SAME_NET_PADS, avoid_graphics=DEFAULT_AVOID_GRAPHICS):
     """Where the vias would go, without placing any. Raises RuntimeError with a
     user-facing message when nothing can go anywhere."""
     from itertools import combinations
@@ -1026,6 +1103,8 @@ def plan(
         keepout += _zone_keepout_shapes(zones, net_name, via_radius_nm, clearances, span)
     if avoid_footprints:
         keepout += _footprint_keepout_shapes(board, net_name, via_radius_nm, clearances)
+    if avoid_graphics:
+        keepout += _graphic_keepout_shapes(board, net_name, via_radius_nm, clearances, span)
     blocked = _blocked_predicate(keepout)
 
     # A candidate blocked by a keepout gets one bounded attempt at a spot beside
@@ -1052,6 +1131,7 @@ def plan(
             for name, on in (
                 (_("other nets' zones"), avoid_other_zones),
                 (_("footprints"), avoid_footprints),
+                (_("graphics"), avoid_graphics),
             )
             if on
         ]
@@ -1079,12 +1159,13 @@ def stitch(
     board, via_type, start_layer, end_layer, net_name, via_dia_mm, drill_mm, spacing_mm,
     pattern, x_offset_mm, y_offset_mm,
     avoid_other_zones=DEFAULT_AVOID_OTHER_ZONES, avoid_footprints=DEFAULT_AVOID_FOOTPRINTS,
-    avoid_same_net_pads=DEFAULT_AVOID_SAME_NET_PADS, parent=None):
+    avoid_same_net_pads=DEFAULT_AVOID_SAME_NET_PADS, avoid_graphics=DEFAULT_AVOID_GRAPHICS,
+    parent=None):
     """Run the stitching. Returns (vias placed, whether they were grouped)."""
     p = plan(
         board, via_type, start_layer, end_layer, net_name, via_dia_mm, drill_mm,
         spacing_mm, pattern, x_offset_mm, y_offset_mm,
-        avoid_other_zones, avoid_footprints, avoid_same_net_pads,
+        avoid_other_zones, avoid_footprints, avoid_same_net_pads, avoid_graphics,
     )
     points, net = p.points, p.net
     diameter_nm = from_mm(via_dia_mm)
@@ -1330,6 +1411,18 @@ class ViaStitchingDialog(wx.Dialog):
             "is a normal use of via stitching, and this would block it."
         ))
 
+        self.avoid_graphics = wx.CheckBox(self, label=_("Avoid graphics"))
+        self.avoid_graphics.SetValue(bool(saved.get("avoid_graphics", DEFAULT_AVOID_GRAPHICS)))
+        self.avoid_graphics.SetToolTip(_(
+            "Keep vias off lines, shapes and text: the silkscreen on each side "
+            "the via reaches, and anything drawn on a copper layer it passes "
+            "through.\n\n"
+            "Footprint silkscreen counts too, such as reference designators "
+            "and component outlines.\n\n"
+            "Off by default: silkscreen over a via is usually just clipped, "
+            "and avoiding all of it thins the grid."
+        ))
+
         self.avoid_same_net_pads = wx.CheckBox(
             self, label=_("Avoid pads already on this net")
         )
@@ -1385,6 +1478,7 @@ class ViaStitchingDialog(wx.Dialog):
             (_("Y-Offset (mm):"), self.y_offset),
             (_("Zones:"), self.avoid_zones),
             (_("Footprints:"), self.avoid_footprints),
+            (_("Graphics:"), self.avoid_graphics),
             (_("Same-net pads:"), self.avoid_same_net_pads),
         ])
 
@@ -1605,6 +1699,7 @@ class ViaStitchingDialog(wx.Dialog):
 
         self.avoid_zones.SetValue(DEFAULT_AVOID_OTHER_ZONES)
         self.avoid_footprints.SetValue(DEFAULT_AVOID_FOOTPRINTS)
+        self.avoid_graphics.SetValue(DEFAULT_AVOID_GRAPHICS)
         self.avoid_same_net_pads.SetValue(DEFAULT_AVOID_SAME_NET_PADS)
 
         self._update_advisory()
@@ -1630,6 +1725,7 @@ class ViaStitchingDialog(wx.Dialog):
             "avoid_other_zones": values["avoid_other_zones"],
             "avoid_footprints": values["avoid_footprints"],
             "avoid_same_net_pads": values["avoid_same_net_pads"],
+            "avoid_graphics": values["avoid_graphics"],
         }
 
     def _apply_via_type_defaults(self):
@@ -1734,6 +1830,7 @@ class ViaStitchingDialog(wx.Dialog):
             "avoid_other_zones": self.avoid_zones.GetValue(),
             "avoid_footprints": self.avoid_footprints.GetValue(),
             "avoid_same_net_pads": self.avoid_same_net_pads.GetValue(),
+            "avoid_graphics": self.avoid_graphics.GetValue(),
         }
 
 

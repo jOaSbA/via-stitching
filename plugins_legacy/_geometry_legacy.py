@@ -392,6 +392,88 @@ def footprint_keepout_shapes(board, net_name, via_radius_nm, clearances):
     ]
 
 
+def _shape_kind(*names):
+    """A value of the graphic shape enum, which KiCad 6 to 9 name differently."""
+    import pcbnew
+    for name in names:
+        value = getattr(pcbnew, name, None)
+        if value is not None:
+            return value
+    return None
+
+
+def graphic_keepout_shapes(board, net_name, via_radius_nm, clearances, span):
+    """Clearance areas around lines, shapes and text where the via shows up:
+    the copper layers in its span, and the silkscreen on each outer side it
+    reaches. Footprint graphics count too, hidden text does not."""
+    import pcbnew
+    from shapely.geometry import LineString, Point, box as shapely_box
+    from shapely.ops import unary_union
+
+    margins = {layer: via_radius_nm + clearances[net_name] for layer in span}
+    if pcbnew.F_Cu in margins:
+        margins[pcbnew.F_SilkS] = via_radius_nm
+    if pcbnew.B_Cu in margins:
+        margins[pcbnew.B_SilkS] = via_radius_nm
+
+    segment = _shape_kind("SHAPE_T_SEGMENT", "S_SEGMENT")
+    arc = _shape_kind("SHAPE_T_ARC", "S_ARC")
+    circle = _shape_kind("SHAPE_T_CIRCLE", "S_CIRCLE")
+    polygon = _shape_kind("SHAPE_T_POLY", "S_POLYGON")
+
+    items = list(board.GetDrawings())
+    for footprint in board.GetFootprints():
+        items += [footprint.Reference(), footprint.Value()]
+        items += list(footprint.GraphicalItems())
+
+    shapes = []
+    for item in items:
+        margin = margins.get(item.GetLayer())
+        if margin is None:
+            continue
+        if not isinstance(item, pcbnew.PCB_SHAPE):
+            # Text and dimensions have no outline to follow, so they are kept
+            # clear as their bounding box.
+            if not getattr(item, "IsVisible", lambda: True)():
+                continue
+            bbox = item.GetBoundingBox()
+            shapes.append(shapely_box(
+                bbox.GetX() - margin, bbox.GetY() - margin,
+                bbox.GetX() + bbox.GetWidth() + margin,
+                bbox.GetY() + bbox.GetHeight() + margin))
+            continue
+        # Only KiCad 9 gives copper graphics a net.
+        if getattr(item, "GetNetname", str)() == net_name:
+            continue
+        kind = item.GetShape()
+        start, end = item.GetStart(), item.GetEnd()
+        if kind == segment:
+            geom = LineString([(start.x, start.y), (end.x, end.y)])
+        elif kind == arc:
+            mid = item.GetArcMid()
+            geom = LineString(arc_coords((start.x, start.y), (mid.x, mid.y), (end.x, end.y)))
+        elif kind == circle:
+            center = item.GetCenter()
+            geom = Point(center.x, center.y).buffer(item.GetRadius(), 16)
+        elif kind == polygon:
+            geom = unary_union(polyset_to_shapely_polygons(item.GetPolyShape()))
+        else:
+            # A rectangle is its own box. ponytail: a bezier is kept clear as
+            # its whole bounding box, flatten the curve if that blocks too much.
+            bbox = item.GetBoundingBox()
+            half = item.GetWidth() // 2
+            geom = shapely_box(bbox.GetX() + half, bbox.GetY() + half,
+                               bbox.GetX() + bbox.GetWidth() - half,
+                               bbox.GetY() + bbox.GetHeight() - half)
+        if geom.is_empty:
+            continue
+        # An outline only blocks along its stroke, not across its inside.
+        if geom.geom_type != "LineString" and not item.IsFilled():
+            geom = geom.boundary
+        shapes.append(geom.buffer(margin + item.GetWidth() // 2, 8))
+    return shapes
+
+
 def pad_copper_keepout_shapes(board, net_name, via_radius_nm, clearances, span,
                                avoid_same_net_pads=False):
     """Clearance areas around pad copper on the spanned layers.

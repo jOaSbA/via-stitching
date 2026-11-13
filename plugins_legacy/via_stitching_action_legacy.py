@@ -54,6 +54,7 @@ DEFAULT_PATTERN = "Square"
 DEFAULT_AVOID_OTHER_ZONES = False
 DEFAULT_AVOID_FOOTPRINTS = False
 DEFAULT_AVOID_SAME_NET_PADS = False
+DEFAULT_AVOID_GRAPHICS = False
 
 EDGE_EPS_MM = 0.05
 HOLE_MARGIN_MM = 0.25
@@ -337,7 +338,8 @@ Plan = namedtuple("Plan", "points candidates region net layers")
 
 def plan(board, via_type, start_layer, end_layer, net_name, via_dia_mm, drill_mm,
          spacing_mm, pattern, x_offset_mm, y_offset_mm,
-         avoid_other_zones=False, avoid_footprints=False, avoid_same_net_pads=False):
+         avoid_other_zones=False, avoid_footprints=False, avoid_same_net_pads=False,
+         avoid_graphics=False):
     """Where the vias would go, without placing any. Raises RuntimeError with a
     user-facing message when nothing can go anywhere."""
     from itertools import combinations
@@ -433,6 +435,8 @@ def plan(board, via_type, start_layer, end_layer, net_name, via_dia_mm, drill_mm
         keepout += geo.zone_keepout_shapes(zones, net_name, via_radius_nm, clearances, span_set)
     if avoid_footprints:
         keepout += geo.footprint_keepout_shapes(board, net_name, via_radius_nm, clearances)
+    if avoid_graphics:
+        keepout += geo.graphic_keepout_shapes(board, net_name, via_radius_nm, clearances, span_set)
     blocked = _blocked_predicate(keepout)
 
     nudge_r = _nudge_radius(spacing_nm, drill_nm)
@@ -464,12 +468,12 @@ def plan(board, via_type, start_layer, end_layer, net_name, via_dia_mm, drill_mm
 def stitch(board, via_type, start_layer, end_layer, net_name, via_dia_mm, drill_mm,
            spacing_mm, pattern, x_offset_mm, y_offset_mm,
            avoid_other_zones=False, avoid_footprints=False, avoid_same_net_pads=False,
-           parent=None):
+           avoid_graphics=False, parent=None):
     """Run the stitching. Returns (vias placed, whether they were grouped)."""
     p = plan(
         board, via_type, start_layer, end_layer, net_name, via_dia_mm, drill_mm,
         spacing_mm, pattern, x_offset_mm, y_offset_mm,
-        avoid_other_zones, avoid_footprints, avoid_same_net_pads,
+        avoid_other_zones, avoid_footprints, avoid_same_net_pads, avoid_graphics,
     )
     points, net = p.points, p.net
     diameter_nm = _from_mm(via_dia_mm)
@@ -749,6 +753,18 @@ class ViaStitchingDialogLegacy(wx.Dialog):
             "is a normal use of via stitching, and this would block it."
         ))
 
+        self.avoid_graphics = wx.CheckBox(self, label=_("Avoid graphics"))
+        self.avoid_graphics.SetValue(bool(saved.get("avoid_graphics", DEFAULT_AVOID_GRAPHICS)))
+        self.avoid_graphics.SetToolTip(_(
+            "Keep vias off lines, shapes and text: the silkscreen on each side "
+            "the via reaches, and anything drawn on a copper layer it passes "
+            "through.\n\n"
+            "Footprint silkscreen counts too, such as reference designators "
+            "and component outlines.\n\n"
+            "Off by default: silkscreen over a via is usually just clipped, "
+            "and avoiding all of it thins the grid."
+        ))
+
         self.avoid_same_net_pads = wx.CheckBox(self, label=_("Avoid pads already on this net"))
         self.avoid_same_net_pads.SetValue(bool(saved.get("avoid_same_net_pads", DEFAULT_AVOID_SAME_NET_PADS)))
         self.avoid_same_net_pads.SetToolTip(_(
@@ -817,6 +833,7 @@ class ViaStitchingDialogLegacy(wx.Dialog):
             (_("Y-Offset (mm):"), self.y_offset),
             (_("Zones:"), self.avoid_zones),
             (_("Footprints:"), self.avoid_footprints),
+            (_("Graphics:"), self.avoid_graphics),
             (_("Same-net pads:"), self.avoid_same_net_pads),
         ])
 
@@ -1040,6 +1057,7 @@ class ViaStitchingDialogLegacy(wx.Dialog):
         self.net.SetValue(DEFAULT_NET if DEFAULT_NET in net_choices else "")
         self.avoid_zones.SetValue(DEFAULT_AVOID_OTHER_ZONES)
         self.avoid_footprints.SetValue(DEFAULT_AVOID_FOOTPRINTS)
+        self.avoid_graphics.SetValue(DEFAULT_AVOID_GRAPHICS)
         self.avoid_same_net_pads.SetValue(DEFAULT_AVOID_SAME_NET_PADS)
         self._update_advisory()
 
@@ -1099,6 +1117,7 @@ class ViaStitchingDialogLegacy(wx.Dialog):
             avoid_other_zones=self.avoid_zones.GetValue(),
             avoid_footprints=self.avoid_footprints.GetValue(),
             avoid_same_net_pads=self.avoid_same_net_pads.GetValue(),
+            avoid_graphics=self.avoid_graphics.GetValue(),
         )
 
     def save_current_as_settings(self):
@@ -1120,6 +1139,7 @@ class ViaStitchingDialogLegacy(wx.Dialog):
             "avoid_other_zones": values["avoid_other_zones"],
             "avoid_footprints": values["avoid_footprints"],
             "avoid_same_net_pads": values["avoid_same_net_pads"],
+            "avoid_graphics": values["avoid_graphics"],
         })
 
 
