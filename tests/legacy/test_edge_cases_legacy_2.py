@@ -197,15 +197,17 @@ def test_x_offset_actually_shifts_the_grid():
     assert abs(shift - 1 * MM) < 10_000  # within 0.01mm of the requested 1mm
 
 
-def test_large_offset_pushing_grid_outside_region_raises_cleanly():
-    board, net = _board(layers=2, size=5 * MM)
-    try:
-        vsl.stitch(board, pcbnew.VIATYPE_THROUGH, pcbnew.F_Cu, pcbnew.B_Cu, "GND",
-                   via_dia_mm=0.4, drill_mm=0.2, spacing_mm=1.0, pattern="Square",
-                   x_offset_mm=500, y_offset_mm=500)  # absurdly large offset
-        raise AssertionError("expected a clean RuntimeError, got none")
-    except RuntimeError:
-        pass  # correct: "no candidates" style error, not a crash
+def test_offset_far_larger_than_the_pour_still_fills_it():
+    """An offset shifts the grid, it does not move it off the board: the grid
+    repeats, so any offset lands the same number of vias."""
+    counts = []
+    for offset in (0, 500):
+        board, net = _board(layers=2, size=5 * MM)
+        p = vsl.plan(board, pcbnew.VIATYPE_THROUGH, pcbnew.F_Cu, pcbnew.B_Cu, "GND",
+                     via_dia_mm=0.4, drill_mm=0.2, spacing_mm=1.0, pattern="Square",
+                     x_offset_mm=offset, y_offset_mm=offset)
+        counts.append(len(p.points))
+    assert counts[0] == counts[1] > 0, counts
 
 
 # ---- VIA_COUNT_WARN boundary -------------------------------------------------

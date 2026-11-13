@@ -17,6 +17,7 @@ from kipy.util import from_mm  # noqa: E402
 
 from via_stitching_action import (  # noqa: E402
     FALLBACK_CLEARANCE_MM,
+    _arc_coords,
     _blocked_predicate,
     _fallback_clearances,
     _footprint_keepout_shapes,
@@ -822,6 +823,8 @@ def _fake_board(pads=(), vias=(), tracks=(), size_mm=20.0, nets=("GND", "SIG")):
         get_pads=lambda: list(pads),
         get_tracks=lambda: list(tracks),
         create_items=create_items,
+        # Groups only, which is all the plugin ever asks get_items for.
+        get_items=lambda kind: [i for i in created if not hasattr(i, "padstack")],
         get_items_by_id=lambda ids: list(ids),
         refill_zones=lambda block=True: None,
         placed=created,
@@ -1073,6 +1076,171 @@ def test_resolve_net_name():
             assert needle in str(exc), exc
         else:
             raise AssertionError(f"{typed!r} resolved")
+
+
+def test_arc_is_followed_not_cut_across_its_chords():
+    # Start, mid and end alone are two chords, which on this half circle pass
+    # 1.5 mm inside the track: a via could sit right on the copper.
+    import math
+
+    r = from_mm(5.0)
+    pts = _arc_coords((r, 0), (0, r), (-r, 0))
+    assert len(pts) > 30, len(pts)
+    assert all(abs(math.hypot(x, y) - r) < 1000 for x, y in pts)  # within 1 um
+    assert math.hypot(pts[0][0] - r, pts[0][1]) < 1000
+    assert math.hypot(pts[-1][0] + r, pts[-1][1]) < 1000
+    assert max(y for _x, y in pts) > 0.99 * r
+
+    # The same end points through the other mid point go the other way round.
+    other = _arc_coords((r, 0), (0, -r), (-r, 0))
+    assert min(y for _x, y in other) < -0.99 * r
+
+    # Three points in a line are a straight segment, not a division by zero.
+    assert _arc_coords((0, 0), (5, 0), (10, 0)) == [(0, 0), (5, 0), (10, 0)]
+
+
+def test_arc_track_keepout_follows_the_arc():
+    from types import SimpleNamespace
+
+    from kipy.board_types import ArcTrack
+    from kipy.geometry import Vector2
+
+    r = from_mm(5.0)
+    arc = ArcTrack()
+    arc.start = Vector2.from_xy(r, 0)
+    arc.mid = Vector2.from_xy(round(r * 0.70710678), round(r * 0.70710678))
+    arc.end = Vector2.from_xy(0, r)
+    arc.width = from_mm(0.25)
+    arc.layer = BoardLayer.BL_F_Cu
+    arc.net = Net(name="SIG")
+    board = SimpleNamespace(get_tracks=lambda: [arc])
+    blocked = _blocked_predicate(_track_keepout_shapes(
+        board, "GND", from_mm(0.3), _fallback_clearances(), [BoardLayer.BL_F_Cu]
+    ))
+    # A via 0.3 mm outside the centreline, a quarter of the way along, would
+    # overlap the track. Two chords left this spot clear.
+    import math
+
+    a = math.pi / 8
+    out = r + from_mm(0.3)
+    assert blocked(round(out * math.cos(a)), round(out * math.sin(a)))
+
+
+def test_grid_offset_reaches_every_edge():
+    # The offset used to shift the bounds, so a negative offset lost the last
+    # column and one larger than the spacing lost the first.
+    bounds = (0, 0, from_mm(11.6), 0)
+
+    def xs(offset_mm):
+        return [x for x, _y in _grid_points(bounds, from_mm(2.0), "Square", from_mm(offset_mm), 0)]
+
+    assert xs(-0.5)[-1] == from_mm(11.5), xs(-0.5)
+    assert xs(3.0)[0] == from_mm(1.0), xs(3.0)
+    # No offset is the grid it always was, and nothing outside the bounds.
+    assert xs(0.0) == [from_mm(2.0 * k) for k in range(6)]
+    for pattern in ("Square", "Hexagonal", "Staggered"):
+        plain = list(_grid_points(BOX, from_mm(2.0), pattern))
+        assert plain == list(_grid_points(BOX, from_mm(2.0), pattern, 0, 0))
+        moved = list(_grid_points(BOX, from_mm(2.0), pattern, from_mm(-0.7), from_mm(5.3)))
+        assert all(0 <= x <= 10 * MM and 0 <= y <= 10 * MM for x, y in moved)
+        assert len(moved) >= len(plain) - 12, (pattern, len(moved), len(plain))
+
+
+def _keepout_via(net="SIG", diameter_mm=0.8, drill_mm=0.3):
+    from types import SimpleNamespace
+
+    return SimpleNamespace(
+        position=SimpleNamespace(x=0, y=0),
+        net=SimpleNamespace(name=net),
+        diameter=from_mm(diameter_mm),
+        drill_diameter=from_mm(drill_mm),
+        padstack=SimpleNamespace(drill=SimpleNamespace(
+            start_layer=BoardLayer.BL_F_Cu, end_layer=BoardLayer.BL_B_Cu)),
+    )
+
+
+def test_keepout_looks_the_layer_order_up_once():
+    # It was one API round trip per existing via: 2700 of them after one run.
+    from types import SimpleNamespace
+
+    calls = []
+    span = [BoardLayer.BL_F_Cu, BoardLayer.BL_B_Cu]
+    board = SimpleNamespace(
+        get_vias=lambda: [_keepout_via() for _ in range(50)],
+        get_pads=lambda: [],
+        get_enabled_layers=lambda: calls.append(1) or span,
+    )
+    assert len(_keepout_shapes(board, from_mm(0.3), span)) == 50
+    assert len(calls) == 1, len(calls)
+
+
+def test_other_net_via_keeps_its_copper_clear_not_just_its_hole():
+    # On a layer the net is not poured on, nothing but this keepout stands
+    # between a new via and another net's via pad.
+    from types import SimpleNamespace
+
+    span = [BoardLayer.BL_F_Cu, BoardLayer.BL_B_Cu]
+    new_r = from_mm(0.3)
+
+    def reach(via):
+        board = SimpleNamespace(
+            get_vias=lambda: [via], get_pads=lambda: [], get_enabled_layers=lambda: span
+        )
+        shape = _keepout_shapes(board, new_r, span, "GND", _fallback_clearances())[0]
+        return shape.bounds[2]
+
+    # Other net: its 0.4 mm pad radius plus the 0.2 mm clearance.
+    assert abs(reach(_keepout_via("SIG")) - (new_r + from_mm(0.4) + from_mm(0.2))) < 1000
+    # Same net: copper may touch, so only the hole margin (0.15 + 0.25 mm).
+    assert abs(reach(_keepout_via("GND")) - (new_r + from_mm(0.15) + from_mm(0.25))) < 1000
+
+
+def test_pad_copper_keepout_follows_the_copper_offset():
+    # A pad's copper can sit off its hole; the keepout belongs on the copper.
+    from types import SimpleNamespace
+
+    pad = _smd_pad("SIG", from_mm(1.0), from_mm(1.0))
+    pad.padstack.copper_layers[0].offset = SimpleNamespace(x=from_mm(3.0), y=0)
+    board = SimpleNamespace(get_pads=lambda: [pad])
+    shape = _pad_copper_keepout_shapes(
+        board, "GND", from_mm(0.3), _fallback_clearances(), [BoardLayer.BL_F_Cu]
+    )[0]
+    assert abs(shape.centroid.x - from_mm(3.0)) < 1000, shape.centroid.x
+    assert abs(shape.centroid.y) < 1000
+
+
+def test_custom_pad_keepout_is_its_real_copper():
+    # A custom pad's size is only its anchor; KiCad is asked for the polygon.
+    from types import SimpleNamespace
+
+    from kipy.proto.board.board_types_pb2 import PadStackShape
+
+    def node(x, y):
+        return SimpleNamespace(has_point=True, has_arc=False, point=SimpleNamespace(x=x, y=y))
+
+    side = from_mm(6.0)
+    polygon = SimpleNamespace(
+        outline=SimpleNamespace(nodes=[node(0, 0), node(side, 0), node(side, side), node(0, side)]),
+        holes=[],
+    )
+    pad = _smd_pad("SIG", from_mm(1.0), from_mm(1.0))
+    pad.padstack.copper_layers[0].shape = PadStackShape.PSS_CUSTOM
+    asked = []
+    board = SimpleNamespace(
+        get_pads=lambda: [pad],
+        get_pad_shapes_as_polygons=lambda pads, layer: asked.append(layer) or [polygon],
+    )
+    args = ("GND", from_mm(0.3), _fallback_clearances(), [BoardLayer.BL_F_Cu])
+    shape = _pad_copper_keepout_shapes(board, *args)[0]
+    assert asked == [BoardLayer.BL_F_Cu]
+    assert shape.bounds[2] > side, shape.bounds
+
+    # KiCad refusing the call falls back to the anchor, not to no keepout.
+    def refuse(pads, layer):
+        raise RuntimeError("no polygon")
+
+    board.get_pad_shapes_as_polygons = refuse
+    assert len(_pad_copper_keepout_shapes(board, *args)) == 1
 
 
 if __name__ == "__main__":

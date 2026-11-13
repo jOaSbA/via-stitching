@@ -143,7 +143,7 @@ def test_reset_last_run_button_tracks_board_state():
         assert dlg.remove_run_btn.IsEnabled()
         assert str(placed) in dlg.remove_run_btn.GetToolTipText()
         # Names the run beside the button, without the internal group prefix.
-        assert dlg.remove_run_label.GetLabel() == f"GND F.Cu:B.Cu, {placed} vias"
+        assert dlg.remove_run_label.GetLabel() == f"GND F.Cu:B.Cu #1, {placed} vias"
         assert dlg.remove_run_label.GetRect().GetLeft() > dlg.remove_run_btn.GetRect().GetRight()
     finally:
         dlg.Destroy()

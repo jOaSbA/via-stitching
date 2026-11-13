@@ -237,7 +237,7 @@ def test_the_run_is_grouped_under_one_readable_name():
     # Layer names, not the raw BoardLayer enum values this used to use: the
     # name is what "Reset last run" puts in front of the user, and the SWIG
     # backend names the same group the same way.
-    assert groups[0].proto.name == "ViaStitching GND F.Cu:B.Cu"
+    assert groups[0].proto.name == "ViaStitching GND F.Cu:B.Cu #1"
     assert len(groups[0].items) == count
 
 
@@ -255,6 +255,27 @@ def test_plan_touches_nothing_and_matches_what_stitch_places():
     count, _grouped = _run(board)
     assert count == len(p.points)
     assert sorted((v.position.x, v.position.y) for v in _vias(board)) == sorted(p.points)
+
+
+def test_runs_are_numbered_in_the_order_they_were_made():
+    # The number is the only thing that says which run is newest once the
+    # board has been saved and reopened: KiCad writes groups in UUID order.
+    board, _ = _board()
+    _run(board)
+    _run(board, spacing=3.0)
+    names = [i.proto.name for i in board.placed if not hasattr(i, "padstack")]
+    assert names == ["ViaStitching GND F.Cu:B.Cu #1", "ViaStitching GND F.Cu:B.Cu #2"], names
+
+
+def test_a_small_inner_pour_does_not_confine_a_through_run():
+    # Any two poured layers are enough for a through via, so a small pour of
+    # the same net on an inner layer may add places to stitch, never remove
+    # the ones the outer planes already gave.
+    plain, _grouped = _run(_board()[0])
+    board, zones = _board(inner_layer=True)
+    zones[0].filled_polygons[BoardLayer.BL_In1_Cu] = _pour(0, 0, 4 * MM, 4 * MM)
+    with_island, _grouped = _run(board)
+    assert with_island == plain > 0, (with_island, plain)
 
 
 if __name__ == "__main__":

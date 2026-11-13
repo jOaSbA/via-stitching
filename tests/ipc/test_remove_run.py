@@ -180,6 +180,20 @@ def test_removing_takes_the_run_its_group_and_nothing_else():
     assert not reported, reported
 
 
+def test_the_newest_run_is_the_highest_number_not_the_last_on_the_board():
+    # KiCad saves groups in UUID order, so after a reopen the last group on
+    # the board is a random one. A run from before the numbering sorts oldest.
+    def run(name, uuid):
+        return _group(GROUP_PREFIX + name, [_via(uuid)])
+
+    board = FakeBoard([
+        run("GND F.Cu:B.Cu #3", "c"), run("GND F.Cu:B.Cu #1", "a"),
+        run("GND F.Cu:B.Cu", "old"), run("GND F.Cu:B.Cu #2", "b"),
+    ])
+    names = [g.proto.name[len(GROUP_PREFIX):] for g, _ in stitching_runs(board)]
+    assert names == ["GND F.Cu:B.Cu", "GND F.Cu:B.Cu #1", "GND F.Cu:B.Cu #2", "GND F.Cu:B.Cu #3"], names
+
+
 if __name__ == "__main__":
     for name, fn in sorted(globals().items()):
         if name.startswith("test_"):

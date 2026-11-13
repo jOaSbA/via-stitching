@@ -393,15 +393,14 @@ def test_via_bigger_than_the_pour_has_no_room():
         raise AssertionError("a via wider than the pour should have failed")
 
 
-def test_offset_far_outside_the_region_fails_cleanly():
-    board, _zones = _board()
-    try:
-        stitch(board, ViaType.VT_THROUGH, BoardLayer.BL_F_Cu, BoardLayer.BL_B_Cu, "GND",
-               0.6, 0.3, 2.0, "Square", 500.0, 500.0)
-    except RuntimeError as exc:
-        assert "fit" in str(exc).lower() or "room" in str(exc).lower(), exc
-    else:
-        raise AssertionError("an offset past the pour should have failed")
+def test_offset_far_larger_than_the_pour_still_fills_it():
+    # The offset shifts a repeating grid, so 500 mm at a 2 mm pitch is the same
+    # grid as no offset at all. It used to push every candidate off the pour.
+    args = (ViaType.VT_THROUGH, BoardLayer.BL_F_Cu, BoardLayer.BL_B_Cu, "GND",
+            0.6, 0.3, 2.0, "Square")
+    plain, _grouped = stitch(_board()[0], *args, 0.0, 0.0)
+    far, _grouped = stitch(_board()[0], *args, 500.0, 500.0)
+    assert far == plain > 0, (far, plain)
 
 
 def test_stitch_itself_does_not_validate_drill_against_diameter():

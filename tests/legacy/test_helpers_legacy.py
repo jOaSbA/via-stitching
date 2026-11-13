@@ -51,6 +51,97 @@ def test_copper_layer_order_is_stackup_order_not_id_order():
     assert inner_span == ["F.Cu", "In1.Cu"], inner_span
 
 
+def test_blind_via_only_blocks_spans_it_shares_a_layer_with():
+    # KiCad 9 numbers B.Cu as 2 and the inner layers from 4 up, so a range
+    # over layer ids made a front-side blind via block the back of the board
+    # and miss its own inner layer.
+    board = pcbnew.BOARD()
+    board.SetCopperLayerCount(4)
+    order = geo.copper_layer_order(board)
+    board.Add(geo.make_via(board, pcbnew.VIATYPE_BLIND_BURIED, order[0], order[1],
+                           600_000, 300_000, 0, 0, 0))
+    margin = pcbnew.FromMM(vsl.HOLE_MARGIN_MM)
+    assert len(geo.via_keepout_shapes(board, 150_000, {order[1]}, margin)) == 1
+    assert geo.via_keepout_shapes(board, 150_000, set(order[2:]), margin) == []
+
+
+def test_other_net_via_keeps_its_copper_clear_too():
+    board = pcbnew.BOARD()
+    board.SetCopperLayerCount(2)
+    board.Add(geo.make_via(board, pcbnew.VIATYPE_THROUGH, pcbnew.F_Cu, pcbnew.B_Cu,
+                           2 * MM, 300_000, 0, 0, 0))  # big copper, small drill
+    span = set(geo.copper_layer_order(board))
+    margin = pcbnew.FromMM(vsl.HOLE_MARGIN_MM)
+    other = board.GetTracks()[0].GetNetname()
+    shapes = geo.via_keepout_shapes(board, 150_000, span, margin, "GND", {other: 200_000})
+    expected = 150_000 + MM + 200_000  # via radius + its copper radius + clearance
+    assert abs(shapes[0].bounds[2] - expected) < 10_000, (shapes[0].bounds, expected)
+    # Same net: only the drill counts, as before.
+    shapes = geo.via_keepout_shapes(board, 150_000, span, margin, other, {other: 200_000})
+    assert abs(shapes[0].bounds[2] - (150_000 + 150_000 + margin)) < 10_000
+
+
+def test_arc_coords_stay_on_the_arc():
+    r = 5 * MM
+    pts = geo.arc_coords((-r, 0), (0, r), (r, 0))
+    assert len(pts) > 30, len(pts)  # a half circle at 5 degrees a step
+    assert math.dist(pts[0], (-r, 0)) < 1000 and math.dist(pts[-1], (r, 0)) < 1000
+    assert all(abs(math.hypot(x, y) - r) < 1000 and y >= -1000 for x, y in pts)
+    # Three points in a line have no circle through them.
+    assert len(geo.arc_coords((0, 0), (MM, 0), (2 * MM, 0))) >= 2
+
+
+def test_runs_sort_by_their_number_not_board_order():
+    # KiCad writes groups in UUID order, so after a save and reload the board
+    # order says nothing about which run is newest.
+    assert vsl._run_number("ViaStitching GND F.Cu:B.Cu #12") == 12
+    assert vsl._run_number("ViaStitching GND F.Cu:B.Cu") == 0
+    board = pcbnew.BOARD()
+    board.SetCopperLayerCount(2)
+    for n in (3, 1, 2):
+        via = geo.make_via(board, pcbnew.VIATYPE_THROUGH, pcbnew.F_Cu, pcbnew.B_Cu,
+                           600_000, 300_000, 0, n * MM, 0)
+        board.Add(via)
+        geo.group_vias(board, [via], f"{vsl.GROUP_PREFIX}GND #{n}")
+    assert [vsl._run_number(g.GetName()) for g, _ in vsl.stitching_runs(board)] == [1, 2, 3]
+
+
+def test_grid_offset_wraps_instead_of_leaving_a_bare_edge():
+    spacing = 2 * MM
+    for pattern in ("Square", "Hexagonal"):
+        pts = list(vsl._grid_points(BOX, spacing, pattern, 3 * MM, 3 * MM))
+        assert min(x for x, _ in pts) < spacing, pattern
+        assert min(y for _, y in pts) < spacing, pattern
+        assert all(x >= 0 and y >= 0 for x, y in pts), pattern
+    square = sorted({x for x, _ in vsl._grid_points(BOX, spacing, "Square", 3 * MM, 0)})
+    assert square[0] == MM and square[1] == 3 * MM, square[:2]
+
+
+def test_small_inner_pour_does_not_confine_a_through_run():
+    def count(inner_size):
+        board = pcbnew.BOARD()
+        board.SetCopperLayerCount(4)
+        gnd = pcbnew.NETINFO_ITEM(board, "GND")
+        board.Add(gnd)
+        for layer, size in ((pcbnew.F_Cu, 10 * MM), (pcbnew.B_Cu, 10 * MM),
+                            (pcbnew.In1_Cu, inner_size)):
+            if not size:
+                continue
+            zone = pcbnew.ZONE(board)
+            zone.SetNet(gnd)
+            zone.SetLayer(layer)
+            board.Add(zone)
+            outline = pcbnew.SHAPE_POLY_SET()
+            outline.NewOutline()
+            for x, y in ((0, 0), (size, 0), (size, size), (0, size)):
+                outline.Append(x, y)
+            zone.SetFilledPolysList(layer, outline)
+        return len(vsl.plan(board, pcbnew.VIATYPE_THROUGH, pcbnew.F_Cu, pcbnew.B_Cu, "GND",
+                            0.6, 0.3, 2.0, "Square", 0, 0).points)
+
+    assert count(2 * MM) == count(0) > 4
+
+
 def test_square_grid():
     pts = list(vsl._grid_points(BOX, 2 * MM, "Square"))
     assert len(pts) == 36, len(pts)  # 6 x 6, both edges included
