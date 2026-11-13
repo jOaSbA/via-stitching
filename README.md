@@ -68,12 +68,18 @@ The settings that need explaining:
 - **Avoid footprints** keeps vias out from under component bodies, for
   mechanical fit. It's off by default, because thermal-via arrays under a QFN
   or BGA ground pad are a normal use of stitching.
+- **Avoid graphics** keeps vias off lines, shapes, and text: the silkscreen on
+  each side the via reaches, and anything drawn on a copper layer it passes
+  through. Footprint silkscreen counts too. Shapes are avoided along their
+  outline, text as its bounding box. It's off by default, because silkscreen
+  over a via is normally just clipped.
 - **Avoid zones of other nets** and **Avoid pads already on this net** are
   covered under [How clearance is handled](#how-clearance-is-handled).
 
 Vias go where the net is poured on both layers the via connects. A through via
 only needs any two poured layers in its span, since its barrel crosses them
-all.
+all, so a small pour on an inner layer adds places to stitch and never takes
+any away.
 
 ### The preview
 
@@ -89,8 +95,9 @@ after the last preview never places stale vias.
 ### Grouping and undo
 
 All the vias from one run go into a group named after it, for example
-`ViaStitching GND F.Cu:B.Cu`. That makes a run one thing rather than four
-hundred:
+`ViaStitching GND F.Cu:B.Cu #1`. The number counts the runs on the board, and
+is how the newest one is still found after the board has been saved and
+reopened. That makes a run one thing rather than four hundred:
 
 - **Reset last run**, at the top of the dialog, deletes the newest run and
   refills the zones. It names the run and its via count beside the button,
@@ -154,6 +161,10 @@ Pads on other nets are avoided either way, with their full clearance.
   under *Tools > External Plugins*. KiCad lists only the older SWIG plugins
   there, and plugins on the new API have no way to add one. The KiCad 6 to 9
   build shows up in that menu as usual.
+- Graphic copper (lines, shapes and text drawn on a copper layer) is only
+  avoided on layers where the net is poured, where the fill already keeps
+  clear of it. For the other layers in the via's span, tick **Avoid
+  graphics**.
 - On a large board each preview update can take a few seconds, and the dialog
   waits for it. Untick **Update automatically** and use **Update preview** to
   redraw only when you ask.
@@ -169,7 +180,7 @@ strings and shared by both builds.
 
 | KiCad | Build | Sources | Version numbers |
 | --- | --- | --- | --- |
-| 10 and later | IPC (`kicad-python` / `kipy`) | `plugins/` | 3.x |
+| 10 and later | IPC (`kicad-python` / `kipy`) | `plugins/` | 4.x |
 | 6, 7, 8, 9 | SWIG (`pcbnew` bindings) | `plugins_legacy/` | 1.x |
 
 KiCad is retiring the SWIG bindings: KiCad 10 already lacks the via type
@@ -185,7 +196,8 @@ moving from KiCad 9 to 10 arrives as an ordinary package update.
 
 `python build.py` builds `dist/via-stitching-<version>.zip` (IPC), and
 `python build.py --legacy` builds `dist/via-stitching-swig-<version>.zip`
-(SWIG). Each writes its archive's SHA-256 and sizes into `metadata.json`. One
+(SWIG). Each writes its archive's SHA-256 and sizes into `metadata.json`. The
+archives are stored uncompressed, so any Python builds the same bytes. One
 tag builds and publishes both, and `tools/check_release.py` refuses a tag that
 disagrees with `metadata.json`.
 
