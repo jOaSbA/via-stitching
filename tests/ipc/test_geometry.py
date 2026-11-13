@@ -1078,6 +1078,42 @@ def test_resolve_net_name():
             raise AssertionError(f"{typed!r} resolved")
 
 
+def test_graphics_block_along_their_stroke_where_the_via_shows():
+    from types import SimpleNamespace
+    from shapely.geometry import Point
+    from shapely.ops import unary_union
+    from kipy.board_types import BoardRectangle, BoardSegment
+    from kipy.geometry import Vector2
+    import via_stitching_action as vs
+
+    def shape(cls, layer, **points):
+        s = cls()
+        s.layer = layer
+        s.attributes.stroke.width = 200_000
+        for name, (x, y) in points.items():
+            setattr(s, name, Vector2.from_xy(x, y))
+        return s
+
+    line = shape(BoardSegment, BoardLayer.BL_F_SilkS, start=(0, 0), end=(10 * MM, 0))
+    frame = shape(BoardRectangle, BoardLayer.BL_F_SilkS, top_left=(0, 5 * MM), bottom_right=(20 * MM, 25 * MM))
+    back = shape(BoardSegment, BoardLayer.BL_B_SilkS, start=(0, 40 * MM), end=(10 * MM, 40 * MM))
+    text = SimpleNamespace(layer=BoardLayer.BL_F_SilkS)
+    box = SimpleNamespace(pos=SimpleNamespace(x=30 * MM, y=30 * MM),
+                          size=SimpleNamespace(x=5 * MM, y=MM))
+    board = SimpleNamespace(
+        get_shapes=lambda: [line, frame, back], get_text=lambda: [text],
+        get_footprints=lambda: [], get_item_bounding_box=lambda items: [box])
+
+    shapes = vs._graphic_keepout_shapes(board, "GND", 300_000, {"GND": 200_000},
+                                        [BoardLayer.BL_F_Cu, BoardLayer.BL_In1_Cu])
+    assert len(shapes) == 3, "the back silkscreen is out of a front-side via's reach"
+    keepout = unary_union(shapes)
+    assert keepout.contains(Point(5 * MM, 350_000)), "stroke half width plus via radius"
+    assert not keepout.contains(Point(5 * MM, 450_000))
+    assert not keepout.contains(Point(10 * MM, 15 * MM)), "inside an unfilled frame is free"
+    assert keepout.contains(Point(32 * MM, 30 * MM + MM // 2)), "text box"
+
+
 def test_arc_is_followed_not_cut_across_its_chords():
     # Start, mid and end alone are two chords, which on this half circle pass
     # 1.5 mm inside the track: a via could sit right on the copper.

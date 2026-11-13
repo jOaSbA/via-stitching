@@ -188,7 +188,7 @@ def test_run_shows_a_message_box_for_a_stitch_runtime_error_not_a_crash():
             via_type=pcbnew.VIATYPE_THROUGH, start_layer=pcbnew.F_Cu, end_layer=pcbnew.B_Cu,
             net_name="NOPE", via_dia_mm=0.6, drill_mm=0.3, spacing_mm=1.0, pattern="Square",
             x_offset_mm=0, y_offset_mm=0, avoid_other_zones=False, avoid_footprints=False,
-            avoid_same_net_pads=False,
+            avoid_same_net_pads=False, avoid_graphics=False,
         )
         wx.MessageBox = lambda text, *a, **k: shown.append(text) or wx.OK
 

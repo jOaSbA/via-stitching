@@ -142,6 +142,43 @@ def test_small_inner_pour_does_not_confine_a_through_run():
     assert count(2 * MM) == count(0) > 4
 
 
+def test_graphics_block_along_their_stroke_where_the_via_shows():
+    from shapely.geometry import Point
+    from shapely.ops import unary_union
+
+    board = pcbnew.BOARD()
+    board.SetCopperLayerCount(2)
+    fp = pcbnew.FOOTPRINT(board)
+    fp.SetPosition(geo.point(5 * MM, 5 * MM))
+    fp.Reference().SetVisible(False)
+    fp.Value().SetVisible(False)
+    outline = fixtures.fp_shape(fp)  # an unfilled 4 mm body outline
+    outline.SetLayer(pcbnew.F_SilkS)
+    outline.SetShape(fixtures.rectangle())
+    outline.SetStart(geo.point(3 * MM, 3 * MM))
+    outline.SetEnd(geo.point(7 * MM, 7 * MM))
+    outline.SetWidth(120_000)
+    fp.Add(outline)
+    board.Add(fp)
+    label = pcbnew.PCB_TEXT(board)
+    label.SetText("GND")
+    label.SetLayer(pcbnew.B_SilkS)
+    label.SetPosition(geo.point(20 * MM, 20 * MM))
+    board.Add(label)
+
+    def keepout(span):
+        return unary_union(geo.graphic_keepout_shapes(board, "GND", 300_000, {"GND": 200_000}, span))
+
+    front = keepout({pcbnew.F_Cu})
+    assert front.contains(Point(3 * MM, 5 * MM)), "on the outline"
+    assert not front.contains(Point(5 * MM, 5 * MM)), "inside an unfilled outline is free"
+    # The text is on the back, which a via that stays on the front never reaches.
+    assert not front.contains(Point(20 * MM, 20 * MM))
+    assert keepout({pcbnew.F_Cu, pcbnew.B_Cu}).contains(Point(20 * MM, 20 * MM))
+    # Hidden reference and value text block nothing.
+    assert len(geo.graphic_keepout_shapes(board, "GND", 300_000, {"GND": 200_000}, {pcbnew.F_Cu})) == 1
+
+
 def test_square_grid():
     pts = list(vsl._grid_points(BOX, 2 * MM, "Square"))
     assert len(pts) == 36, len(pts)  # 6 x 6, both edges included
