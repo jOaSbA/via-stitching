@@ -61,6 +61,9 @@ class PreviewCanvas(wx.Panel):
         self.Bind(wx.EVT_LEFT_DOWN, self._on_down)
         self.Bind(wx.EVT_LEFT_UP, self._on_up)
         self.Bind(wx.EVT_MOTION, self._on_motion)
+        # wx asserts if a window that captured the mouse ignores losing it
+        # (alt-tab or a message box in the middle of a drag).
+        self.Bind(wx.EVT_MOUSE_CAPTURE_LOST, lambda evt: setattr(self, "_drag", None))
         self.Bind(wx.EVT_LEFT_DCLICK, lambda evt: (self._fit(), self.Refresh()))
 
     def set_plan(self, plan, via_diameter_nm, styles):

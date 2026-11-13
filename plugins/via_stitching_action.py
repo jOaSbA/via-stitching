@@ -38,7 +38,7 @@ from kipy import KiCad
 from kipy.errors import ApiError, ConnectionError as KiCadConnectionError
 from kipy.proto.common import ApiStatusCode
 from kipy.proto.common.types import KiCadObjectType
-from kipy.proto.board.board_types_pb2 import BoardLayer as BL, ViaType
+from kipy.proto.board.board_types_pb2 import BoardLayer as BL, PadStackShape, ViaType
 from kipy.board_types import Group, Via, ArcTrack, PadType, PSS_CIRCLE
 from kipy.geometry import Vector2
 from kipy.util.units import from_mm, to_mm
@@ -64,10 +64,18 @@ API_TIMEOUT_MS = 30000
 
 DEFAULT_NET = "GND"
 
-# Every group this plugin makes is named "<prefix><net> <start>:<end>".
+# Every group this plugin makes is named "<prefix><net> <start>:<end> #<n>".
 # "Reset last run" finds its own work by that prefix, so nothing else on
-# the board can be swept up by it.
+# the board can be swept up by it, and the newest run by the number: KiCad
+# saves groups in UUID order, so their order on the board says nothing about
+# which run came last once the board has been reopened.
 GROUP_PREFIX = "ViaStitching "
+
+
+def _run_number(name):
+    """The n a run's group name ends in. 0 for a run older than the numbering."""
+    m = re.search(r" #(\d+)$", name)
+    return int(m.group(1)) if m else 0
 
 # Default via settings
 DEFAULT_VIA_DIAMETER_MM = 0.6
@@ -241,11 +249,36 @@ def _color_swatch(rgb, size=14):
     dc.SelectObject(wx.NullBitmap)
     return bmp
 
+def _arc_coords(start, mid, end, step=math.radians(5)):
+    """Points along the arc through three (x, y) points, one every `step`.
+
+    Start, mid and end alone are two chords, which cut up to 0.3 radius inside
+    a half circle: a via could then sit on the track itself."""
+    bx, by = mid[0] - start[0], mid[1] - start[1]
+    cx, cy = end[0] - start[0], end[1] - start[1]
+    d = 2 * (bx * cy - by * cx)
+    if d == 0:
+        return [start, mid, end]  # collinear: a straight segment
+    ux = (cy * (bx * bx + by * by) - by * (cx * cx + cy * cy)) / d
+    uy = (bx * (cx * cx + cy * cy) - cx * (bx * bx + by * by)) / d
+    r = math.hypot(ux, uy)
+    a0 = math.atan2(-uy, -ux)
+    full = (math.atan2(cy - uy, cx - ux) - a0) % (2 * math.pi)
+    via_mid = (math.atan2(by - uy, bx - ux) - a0) % (2 * math.pi)
+    sweep = full if via_mid <= full else full - 2 * math.pi
+    n = max(2, math.ceil(abs(sweep) / step))
+    return [
+        (start[0] + ux + r * math.cos(a0 + sweep * i / n),
+         start[1] + uy + r * math.sin(a0 + sweep * i / n))
+        for i in range(n + 1)
+    ]
+
+
 def _polyline_coords(polyline):
     """Convert a kipy PolyLine into a list of (x, y) nm tuples for shapely.
 
-    Zone fill outlines are polygonal; arc nodes (rare in fills) are approximated
-    by their start/mid/end points.
+    Zone fill outlines are polygonal; arc nodes (rare in fills) are sampled
+    along the arc.
     """
     coords = []
     for node in polyline.nodes:
@@ -254,8 +287,9 @@ def _polyline_coords(polyline):
             coords.append((p.x, p.y))
         elif node.has_arc:
             arc = node.arc
-            for pt in (arc.start, arc.mid, arc.end):
-                coords.append((pt.x, pt.y))
+            coords.extend(_arc_coords(
+                (arc.start.x, arc.start.y), (arc.mid.x, arc.mid.y), (arc.end.x, arc.end.y)
+            ))
     return coords
 
 
@@ -283,9 +317,13 @@ def _copper_layer_order(board):
     return [l for l in iter_copper_layers() if l in enabled]
 
 
-def _span_layers(board, start_layer, end_layer):
-    """All enabled copper layers between start and end, inclusive, in stackup order."""
-    order = _copper_layer_order(board)
+def _span_layers(board, start_layer, end_layer, order=None):
+    """All enabled copper layers between start and end, inclusive, in stackup order.
+
+    Pass `order` when asking for many spans: the layer order is an API round
+    trip each time it is looked up."""
+    if order is None:
+        order = _copper_layer_order(board)
     i, j = order.index(start_layer), order.index(end_layer)
     if i > j:
         i, j = j, i          # user may have picked them "upside down"
@@ -402,11 +440,14 @@ def _blocked_predicate(shapes):
     return lambda x, y: len(tree.query(Point(x, y), predicate="intersects")) > 0
 
 
-def _keepout_shapes(board, via_radius_nm, span):
+def _keepout_shapes(board, via_radius_nm, span, net_name=None, clearances=None):
     """Drill keepouts around existing vias and through-hole pads.
 
     Prevents new stitching vias from violating hole-to-hole clearance.
     Only vias whose layer span overlaps the new via's span can collide.
+    Given `clearances`, a via on another net also keeps its copper plus
+    clearance clear: the fill inset only does that on layers the net is
+    poured on.
     Round holes get circles; milled slots get a capsule along their long
     axis instead of a circle as wide as the slot is long, which blocked a
     far larger disc than the hole itself.
@@ -415,14 +456,23 @@ def _keepout_shapes(board, via_radius_nm, span):
     margin = from_mm(HOLE_MARGIN_MM)
     span_set = set(span)
     shapes = []
-    for via in board.get_vias():
+    vias = board.get_vias()
+    # Looked up once, not per via: after a 2700-via run that was 2700 round
+    # trips, well over a second on every preview update.
+    order = _copper_layer_order(board) if vias else []
+    for via in vias:
         try:
-            via_span = set(_span_layers(board, via.padstack.drill.start_layer, via.padstack.drill.end_layer))
+            via_span = set(_span_layers(
+                board, via.padstack.drill.start_layer, via.padstack.drill.end_layer, order
+            ))
         except ValueError:
             via_span = span_set  # unknown span: be conservative, treat as blocking
         if not (via_span & span_set):
             continue
-        r = via_radius_nm + via.drill_diameter // 2 + margin
+        r = via.drill_diameter // 2 + margin
+        if clearances is not None and via.net.name != net_name:
+            r = max(r, via.diameter // 2 + clearances[via.net.name])
+        r += via_radius_nm
         shapes.append(Point(via.position.x, via.position.y).buffer(r, quad_segs=8))
     for pad in board.get_pads():
         if pad.pad_type not in (PadType.PT_PTH, PadType.PT_NPTH):
@@ -482,11 +532,11 @@ def _track_keepout_shapes(board, net_name, via_radius_nm, clearances, span):
         if track.net.name == net_name or track.layer not in span_set:
             continue
         if isinstance(track, ArcTrack):
-            coords = [
+            coords = _arc_coords(
                 (track.start.x, track.start.y),
                 (track.mid.x, track.mid.y),
                 (track.end.x, track.end.y),
-            ]
+            )
         else:
             coords = [(track.start.x, track.start.y), (track.end.x, track.end.y)]
         r = via_radius_nm + track.width // 2 + clearances[track.net.name]
@@ -626,6 +676,7 @@ def _pad_copper_keepout_shapes(board, net_name, via_radius_nm, clearances, span,
     from shapely import affinity
     span_set = set(span)
     shapes = []
+    custom = []  # (pad, margin, anchor, layer): real copper is asked for below
     for pad in board.get_pads():
         same_net = pad.net.name == net_name
         if same_net and not avoid_same_net_pads:
@@ -642,29 +693,57 @@ def _pad_copper_keepout_shapes(board, net_name, via_radius_nm, clearances, span,
         # wrong ring for a blind via between two inner layers.
         try:
             layers = pad.padstack.copper_layers
-            size = next((l for l in layers if l.layer in span_set), layers[0]).size
+            copper = next((l for l in layers if l.layer in span_set), layers[0])
+            size = copper.size
         except Exception:
             continue
         if size.x <= 0 or size.y <= 0:
             continue
         margin = via_radius_nm + (0 if same_net else clearances[pad.net.name])
+        # The copper sits `offset` away from the pad position (the hole), in
+        # the pad's own frame, so it turns about the position with it.
+        offset = getattr(copper, "offset", None)
+        cx = pad.position.x + (offset.x if offset is not None else 0)
+        cy = pad.position.y + (offset.y if offset is not None else 0)
         rect = shapely_box(
-            pad.position.x - size.x // 2, pad.position.y - size.y // 2,
-            pad.position.x + size.x // 2, pad.position.y + size.y // 2,
+            cx - size.x // 2, cy - size.y // 2,
+            cx + size.x // 2, cy + size.y // 2,
         )
         angle_deg = _pad_angle_degrees(pad)
         if angle_deg:
-            rect = affinity.rotate(rect, -angle_deg, origin="center")
-        shapes.append(rect.buffer(margin, quad_segs=8))
+            rect = affinity.rotate(rect, -angle_deg, origin=(pad.position.x, pad.position.y))
+        if getattr(copper, "shape", None) == PadStackShape.PSS_CUSTOM:
+            custom.append((pad, margin, rect, copper.layer))
+        else:
+            shapes.append(rect.buffer(margin, quad_segs=8))
+
+    # The size of a custom pad is only its anchor. Its real copper is the
+    # polygon KiCad draws, already rotated and in place, asked for in one call
+    # per layer. If KiCad will not hand it over, the anchor still beats nothing.
+    by_layer = defaultdict(list)
+    for entry in custom:
+        by_layer[entry[3]].append(entry)
+    for layer, entries in by_layer.items():
+        try:
+            polygons = board.get_pad_shapes_as_polygons([e[0] for e in entries], layer)
+        except Exception:
+            polygons = [None] * len(entries)
+        for (_pad, margin, rect, _layer), pwh in zip(entries, polygons):
+            poly = _polygon_with_holes_to_shapely(pwh) if pwh is not None else None
+            shapes.append((poly if poly is not None else rect).buffer(margin, quad_segs=8))
     return shapes
 
 
-def _grid_points(bounds, spacing_nm, pattern):
+def _grid_points(bounds, spacing_nm, pattern, x_offset_nm=0, y_offset_nm=0):
     """Yield candidate (x, y) nm points across `bounds` for the given pattern.
 
     The grid is anchored to `bounds`, so the user controls placement via the
     region itself (and the X/Y offset parameters). Positions are therefore
     not reproducible across runs if the region's bounding box changes.
+
+    The offset moves the grid, never the bounds: the grid is laid out from one
+    whole period before the corner, so a negative offset, or one larger than
+    the spacing, still reaches every edge of `bounds`.
     """
     minx, miny, maxx, maxy = bounds
     minx, miny = int(math.floor(minx)), int(math.floor(miny))
@@ -675,15 +754,19 @@ def _grid_points(bounds, spacing_nm, pattern):
         row_pitch = spacing_nm
     if row_pitch <= 0 or spacing_nm <= 0:
         return
-    row = 0
-    y = miny
+    # Two rows are one period of the staggered patterns, so start two rows up
+    # to keep which rows are the shifted ones.
+    x0 = minx + x_offset_nm % spacing_nm - spacing_nm
+    row = -2
+    y = miny + y_offset_nm % (2 * row_pitch) - 2 * row_pitch
     while y <= maxy:
         if pattern in ("Hexagonal", "Staggered") and (row % 2) == 1:
-            x = minx + spacing_nm // 2
+            x = x0 + spacing_nm // 2
         else:
-            x = minx
+            x = x0
         while x <= maxx:
-            yield (x, y)
+            if x >= minx and y >= miny:
+                yield (x, y)
             x += spacing_nm
         y += row_pitch
         row += 1
@@ -783,8 +866,13 @@ def _group_vias(board, vias, net_name, start_layer, end_layer):
     try:
         group = Group()
         span = f"{board.get_layer_name(start_layer)}:{board.get_layer_name(end_layer)}"
+        number = 1 + max(
+            (_run_number(g.proto.name) for g in board.get_items(KiCadObjectType.KOT_PCB_GROUP)
+             if g.proto.name.startswith(GROUP_PREFIX)),
+            default=0,
+        )
         # Group.name is read-only in kicad-python 0.7.x, the inherited proto is not.
-        group.proto.name = f"{GROUP_PREFIX}{net_name} {span}"
+        group.proto.name = f"{GROUP_PREFIX}{net_name} {span} #{number}"
         group.items = vias  # stores the member KIIDs, so the vias must exist already
         return bool(board.create_items(group))
     except Exception:
@@ -792,7 +880,8 @@ def _group_vias(board, vias, net_name, start_layer, end_layer):
 
 
 def stitching_runs(board):
-    """Every stitching run still on the board, as (group, its vias).
+    """Every stitching run still on the board, as (group, its vias), oldest
+    first.
 
     Deliberately not board.get_groups(): that unwraps the members of every
     group on the board in one call, so one unrelated group with a dangling
@@ -810,7 +899,7 @@ def stitching_runs(board):
         vias = [m for m in members if isinstance(m, Via)]
         if vias:  # a run whose vias are already gone is nothing to remove
             runs.append((group, vias))
-    return runs
+    return sorted(runs, key=lambda run: _run_number(run[0].proto.name))
 
 
 # What plan() works out, before anything touches the board. `region` is the
@@ -829,7 +918,10 @@ def plan(
     avoid_same_net_pads=DEFAULT_AVOID_SAME_NET_PADS):
     """Where the vias would go, without placing any. Raises RuntimeError with a
     user-facing message when nothing can go anywhere."""
+    from itertools import combinations
+
     from shapely.geometry import Point
+    from shapely.ops import unary_union
     from shapely.prepared import prep
 
     diameter_nm = from_mm(via_dia_mm)
@@ -874,15 +966,20 @@ def plan(
             ).format(net=net_name, layers=names)
         )
 
-    # Keep the via on the net's copper on every poured layer it passes, since
-    # the barrel connects all of them. Layers in the span where the net is NOT
-    # poured are left to DRC: the barrel passing through another net's copper
-    # there is not checked here.
-    region = regions[poured[0]]
-    for layer in poured[1:]:
-        region = region.intersection(regions[layer])
+    # A via goes wherever it stands, whole, on the net's copper on two layers:
+    # any two poured layers of the span for a through via, the two it connects
+    # for every other type. Not the overlap of every poured layer: one small
+    # pour on an inner layer would then confine the whole run to that island.
+    # Where the via passes a layer outside the net's copper there, the track,
+    # pad and (if asked for) zone keepouts are what protect that layer.
+    if via_type == ViaType.VT_THROUGH:
+        pairs = list(combinations(poured, 2))
+    else:
+        pairs = [(start_layer, end_layer)]
+    overlaps = [regions[a].intersection(regions[b]) for a, b in pairs]
+    overlap = unary_union(overlaps)
 
-    if region.is_empty:
+    if overlap.is_empty:
         raise RuntimeError(
             _(
                 "The selected net's planes do not overlap anywhere on the "
@@ -890,10 +987,10 @@ def plan(
             )
         )
 
-    # Inset so the via body + clearance ring stay inside the fill on all layers.
+    # Inset each pair's overlap on its own, so the via body + clearance ring
+    # stay inside the fill on both layers of at least one pair.
     inset = via_radius_nm + from_mm(EDGE_EPS_MM)
-    overlap = region
-    region = region.buffer(-inset)
+    region = unary_union([o.buffer(-inset) for o in overlaps])
     if region.is_empty:
         raise RuntimeError(
             _("No room for vias after clearance inset. Try a smaller via diameter.")
@@ -902,21 +999,11 @@ def plan(
     # Grid before subtracting the keepout, so "grid too coarse" and "every position
     # is taken by an existing hole" get different messages. The grid is anchored to
     # region.bounds (shifted by the offset), so it is not reproducible run to run.
-    #
-    # The offset shifts the bounds themselves, not the generated points: shifting
-    # points after generating them against the un-shifted bounds can only ever
-    # drop candidates that move outside the region, never add the candidates
-    # that only become valid once shifted, which silently undercounts a whole
-    # edge for any nonzero offset.
-    minx, miny, maxx, maxy = region.bounds
-    shifted_bounds = (
-        minx + x_offset_nm, miny + y_offset_nm, maxx + x_offset_nm, maxy + y_offset_nm,
-    )
     prepared = prep(region)
     allowed = lambda pt: prepared.contains(pt)
     candidates = [
         (x, y)
-        for (x, y) in _grid_points(shifted_bounds, spacing_nm, pattern)
+        for (x, y) in _grid_points(region.bounds, spacing_nm, pattern, x_offset_nm, y_offset_nm)
         if allowed(Point(x, y))
     ]
     if not candidates:
@@ -931,7 +1018,7 @@ def plan(
     # index. Avoid existing via/pad drill holes, other nets' pad copper and
     # tracks, plus whatever else the dialog asked for.
     clearances = _net_clearances(board, nets, net_name)
-    keepout = _keepout_shapes(board, via_radius_nm, span)
+    keepout = _keepout_shapes(board, via_radius_nm, span, net_name, clearances)
     keepout += _pad_copper_keepout_shapes(board, net_name, via_radius_nm, clearances, span, avoid_same_net_pads)
     keepout += _rule_area_keepout_shapes(zones, via_radius_nm, span)
     keepout += _track_keepout_shapes(board, net_name, via_radius_nm, clearances, span)
@@ -1102,11 +1189,12 @@ class ViaStitchingDialog(wx.Dialog):
             sample_via_end_layer = sample_via.padstack.drill.end_layer
             sample_via_net_name = sample_via.net.name
 
-        # A preselected via's own settings always win. Otherwise fall back to
-        # whatever was saved from the last successful run, then the hardcoded
-        # defaults. Never touched when a via was preselected, so pasting a real
-        # via's settings is never second-guessed by a stale saved run.
-        saved = {} if sample_via else _load_settings()
+        # A preselected via's own settings always win: type, layers, net, sizes
+        # and offsets each check sample_via before `saved`, so pasting a real
+        # via's settings is never second-guessed by a stale saved run. What a
+        # via says nothing about (the pattern, the avoid boxes) still comes
+        # from the last run. Then the hardcoded defaults.
+        saved = _load_settings()
 
         grid = wx.FlexGridSizer(cols=2, vgap=5, hgap=5)
         grid.AddGrowableCol(1)
@@ -1184,8 +1272,11 @@ class ViaStitchingDialog(wx.Dialog):
         else:
             self.pattern.SetSelection(PATTERNS.index(DEFAULT_PATTERN))
 
-        # if sample via layer starts in an odd layer then it starts with an offset
-        if sample_via and sample_via_start_layer % 2 == 0:
+        # A via cloned from every second layer of the stackup (In1, In3, ...,
+        # B.Cu) starts with an offset, so a pass from the back does not land
+        # on the pass from the front. By stackup position, not the layer's
+        # enum value, which only happened to have the matching parity.
+        if sample_via and copper_layer_ids.index(sample_via_start_layer) % 2 == 1:
             x_offset_str = str(to_mm(sample_via.diameter * 2))
             y_offset_str = str(to_mm(sample_via.diameter * 2))
         elif not sample_via and saved:
@@ -1589,7 +1680,9 @@ class ViaStitchingDialog(wx.Dialog):
 
         if start_layer == end_layer:
             raise ValueError(
-                _("Start and end layers must not be the same ({layer})").format(layer=start_layer)
+                _("Start and end layers must not be the same ({layer})").format(
+                    layer=self.start_layer.GetStringSelection()
+                )
             )
 
         try:
@@ -1608,6 +1701,8 @@ class ViaStitchingDialog(wx.Dialog):
             raise ValueError(
                 _("Via diameter, drill and spacing must be real numbers (mm).")
             )
+        if not all(math.isfinite(v) for v in (x_offset_mm, y_offset_mm)):
+            raise ValueError(_("Via diameter, drill and spacing and offsets must be numbers (mm)."))
         if min(via_dia_mm, drill_mm, spacing_mm) <= 0:
             raise ValueError(
                 _("Via diameter, drill and spacing must all be greater than zero.")

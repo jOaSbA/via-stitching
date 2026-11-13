@@ -58,6 +58,37 @@ def size(x, y):
     return ctor(int(x), int(y))
 
 
+def via_width(via):
+    """A via's copper diameter. KiCad 9 made the width per layer, and the
+    layer-less getter asserts there; KiCad 6 to 8 only have the layer-less one."""
+    return via.GetWidth(via.TopLayer()) if kicad_major() >= 9 else via.GetWidth()
+
+
+def arc_coords(start, mid, end, step=math.radians(5)):
+    """Points along the arc through three (x, y) points, one every `step`.
+
+    Start, mid and end alone are two chords, which cut up to 0.3 radius inside
+    a half circle: a via could then sit on the track itself."""
+    bx, by = mid[0] - start[0], mid[1] - start[1]
+    cx, cy = end[0] - start[0], end[1] - start[1]
+    d = 2 * (bx * cy - by * cx)
+    if d == 0:
+        return [start, mid, end]  # collinear: a straight segment
+    ux = (cy * (bx * bx + by * by) - by * (cx * cx + cy * cy)) / d
+    uy = (bx * (cx * cx + cy * cy) - cx * (bx * bx + by * by)) / d
+    r = math.hypot(ux, uy)
+    a0 = math.atan2(-uy, -ux)
+    full = (math.atan2(cy - uy, cx - ux) - a0) % (2 * math.pi)
+    via_mid = (math.atan2(by - uy, bx - ux) - a0) % (2 * math.pi)
+    sweep = full if via_mid <= full else full - 2 * math.pi
+    n = max(2, math.ceil(abs(sweep) / step))
+    return [
+        (start[0] + ux + r * math.cos(a0 + sweep * i / n),
+         start[1] + uy + r * math.sin(a0 + sweep * i / n))
+        for i in range(n + 1)
+    ]
+
+
 def _netclass_resolver(board):
     """Returns lookup(net) -> netclass or None, built once per board.
 
@@ -211,21 +242,35 @@ def net_clearances(board, net_name):
     return clearances
 
 
-def via_keepout_shapes(board, via_radius_nm, span, hole_margin_nm):
-    """Drill keepouts around existing vias, on layers the new via's span overlaps."""
+def via_keepout_shapes(board, via_radius_nm, span, hole_margin_nm,
+                       net_name=None, clearances=None):
+    """Keepouts around existing vias, on layers the new via's span overlaps.
+
+    Every via keeps its drill plus the hole margin clear. Given `clearances`,
+    a via on another net also keeps its copper plus clearance clear: the fill
+    inset only does that on layers the net is poured on."""
     import pcbnew
     from shapely.geometry import Point
 
     span_set = set(span)
+    order = copper_layer_order(board)
     shapes = []
     for track in board.GetTracks():
         if not isinstance(track, pcbnew.PCB_VIA):
             continue
-        top, bottom = track.TopLayer(), track.BottomLayer()
-        via_span = set(range(min(top, bottom), max(top, bottom) + 1))
+        # By stackup position, never by raw id: KiCad 9 numbers B_Cu as 2 and
+        # the inner layers from 4 up, so a range over ids is not a span.
+        try:
+            i, j = sorted((order.index(track.TopLayer()), order.index(track.BottomLayer())))
+            via_span = set(order[i:j + 1])
+        except ValueError:
+            via_span = span_set  # unknown span: be conservative, treat as blocking
         if not (via_span & span_set):
             continue
-        r = via_radius_nm + track.GetDrillValue() // 2 + hole_margin_nm
+        r = track.GetDrillValue() // 2 + hole_margin_nm
+        if clearances is not None and track.GetNetname() != net_name:
+            r = max(r, via_width(track) // 2 + clearances[track.GetNetname()])
+        r += via_radius_nm
         pos = track.GetPosition()
         shapes.append(Point(pos.x, pos.y).buffer(r, 8))
     return shapes
@@ -279,7 +324,7 @@ def track_keepout_shapes(board, net_name, via_radius_nm, clearances, span):
             continue
         if isinstance(track, pcbnew.PCB_ARC):
             s, m, e = track.GetStart(), track.GetMid(), track.GetEnd()
-            coords = [(s.x, s.y), (m.x, m.y), (e.x, e.y)]
+            coords = arc_coords((s.x, s.y), (m.x, m.y), (e.x, e.y))
         else:
             s, e = track.GetStart(), track.GetEnd()
             coords = [(s.x, s.y), (e.x, e.y)]
@@ -367,22 +412,38 @@ def pad_copper_keepout_shapes(board, net_name, via_radius_nm, clearances, span,
             same_net = pad.GetNetname() == net_name
             if same_net and not avoid_same_net_pads:
                 continue
+            layerset = pad.GetLayerSet()
             if pad.GetAttribute() not in (pcbnew.PAD_ATTRIB_PTH, pcbnew.PAD_ATTRIB_NPTH):
-                layerset = pad.GetLayerSet()
                 if not any(layerset.Contains(l) for l in span_set):
                     continue
             size = pad.GetSize()
             if size.x <= 0 or size.y <= 0:
                 continue
             margin = via_radius_nm + (0 if same_net else clearances[pad.GetNetname()])
-            pos = pad.GetPosition()
+            if pad.GetShape() == pcbnew.PAD_SHAPE_CUSTOM:
+                # The size of a custom pad is only its anchor. Its real copper
+                # is the polygon KiCad draws, already rotated and in place.
+                try:
+                    layer = next((l for l in span if layerset.Contains(l)), pcbnew.F_Cu)
+                    poly = (pad.GetEffectivePolygon(layer) if kicad_major() >= 9
+                            else pad.GetEffectivePolygon())
+                    custom = polyset_to_shapely_polygons(poly)
+                except Exception:
+                    custom = []
+                if custom:
+                    shapes.extend(p.buffer(margin, 8) for p in custom)
+                    continue
+            # The copper sits `offset` away from the pad position (the hole),
+            # in the pad's own frame, so it turns about the position with it.
+            pos, offset = pad.GetPosition(), pad.GetOffset()
+            cx, cy = pos.x + offset.x, pos.y + offset.y
             rect = shapely_box(
-                pos.x - size.x // 2, pos.y - size.y // 2,
-                pos.x + size.x // 2, pos.y + size.y // 2,
+                cx - size.x // 2, cy - size.y // 2,
+                cx + size.x // 2, cy + size.y // 2,
             )
             angle_deg = pad.GetOrientationDegrees()
             if angle_deg:
-                rect = affinity.rotate(rect, -angle_deg, origin="center")
+                rect = affinity.rotate(rect, -angle_deg, origin=(pos.x, pos.y))
             shapes.append(rect.buffer(margin, 8))
     return shapes
 
@@ -401,7 +462,10 @@ def make_via(board, via_type, start_layer, end_layer, diameter_nm, drill_nm, net
     via.SetPosition(point(x, y))
     via.SetViaType(via_type)
     via.SetLayerPair(start_layer, end_layer)
-    via.SetWidth(diameter_nm)
+    if kicad_major() >= 9:
+        via.SetWidth(pcbnew.F_Cu, diameter_nm)  # the layer-less setter asserts on 9
+    else:
+        via.SetWidth(diameter_nm)
     via.SetDrill(drill_nm)
     via.SetNetCode(net_code)
     return via

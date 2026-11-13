@@ -1,4 +1,6 @@
-kicad-python>=0.7.1
+# Capped at the newest release the tests have run on (0.7.1 and 0.8.0): the
+# plugin reads a few protos kipy does not wrap yet, which a new minor may move.
+kicad-python>=0.7.1,<0.9
 # wxPython publishes no Linux wheels, and KiCad installs with --only-binary
 # :all:, so on Linux this line has no candidate and aborts the whole resolve
 # before anything else installs. There wx comes from the distro package that

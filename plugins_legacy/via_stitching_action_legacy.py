@@ -1,4 +1,4 @@
-# Via Stitching - legacy SWIG action plugin for KiCad 6/7/8
+# Via Stitching - legacy SWIG action plugin for KiCad 6 to 9
 #
 # Fills the overlap of a net's copper zones (e.g. the top + bottom GND pours)
 # with a grid of vias, on whichever two copper layers you pick. Same feature
@@ -58,7 +58,16 @@ DEFAULT_AVOID_SAME_NET_PADS = False
 EDGE_EPS_MM = 0.05
 HOLE_MARGIN_MM = 0.25
 VIA_COUNT_WARN = 5000
+# Every group is named "<prefix><net> <start>:<end> #<n>". The number is what
+# says which run is the newest: KiCad saves groups in UUID order, so their
+# order on the board means nothing once the board has been reopened.
 GROUP_PREFIX = "ViaStitching "
+
+
+def _run_number(name):
+    """The n a run's group name ends in. 0 for a run older than the numbering."""
+    m = re.search(r" #(\d+)$", name)
+    return int(m.group(1)) if m else 0
 
 
 def _mm(nm):
@@ -238,22 +247,21 @@ def _via_type_advisory(board, via_type, start_layer, end_layer):
                 "outer layer (F.Cu or B.Cu) to the layer right next to it. "
                 "KiCad's DRC will likely flag this via.")
             )
-    elif via_type == pcbnew.VIATYPE_BLIND_BURIED:
-        if not (starts_outer or ends_outer):
-            return (
-                "This isn't a standard blind/buried via with both layers "
-                "inside the board: pick an outer layer (F.Cu or B.Cu) for a "
-                "blind via, or two inner layers for a buried one."
-            )
+    # Blind/Buried is one type on legacy and covers every other pairing: an
+    # outer layer makes it blind, two inner layers make it buried.
     return None
 
 
 # ---- geometry / stitching --------------------------------------------------
 
-def _grid_points(bounds, spacing_nm, pattern):
+def _grid_points(bounds, spacing_nm, pattern, x_offset_nm=0, y_offset_nm=0):
     """Candidate (x, y) nm points across `bounds` for the given pattern.
     Identical to the IPC version's _grid_points -- pure Python, no board
-    API calls, shared as-is between backends."""
+    API calls, shared as-is between backends.
+
+    The offset moves the grid, never the bounds: the grid is laid out from one
+    whole period before the corner, so a negative offset, or one larger than
+    the spacing, still reaches every edge of `bounds`."""
     minx, miny, maxx, maxy = bounds
     minx, miny = int(math.floor(minx)), int(math.floor(miny))
     maxx, maxy = int(math.ceil(maxx)), int(math.ceil(maxy))
@@ -263,15 +271,19 @@ def _grid_points(bounds, spacing_nm, pattern):
         row_pitch = spacing_nm
     if row_pitch <= 0 or spacing_nm <= 0:
         return
-    row = 0
-    y = miny
+    # Two rows are one period of the staggered patterns, so start two rows up
+    # to keep which rows are the shifted ones.
+    x0 = minx + x_offset_nm % spacing_nm - spacing_nm
+    row = -2
+    y = miny + y_offset_nm % (2 * row_pitch) - 2 * row_pitch
     while y <= maxy:
         if pattern in ("Hexagonal", "Staggered") and (row % 2) == 1:
-            x = minx + spacing_nm // 2
+            x = x0 + spacing_nm // 2
         else:
-            x = minx
+            x = x0
         while x <= maxx:
-            yield (x, y)
+            if x >= minx and y >= miny:
+                yield (x, y)
             x += spacing_nm
         y += row_pitch
         row += 1
@@ -328,7 +340,10 @@ def plan(board, via_type, start_layer, end_layer, net_name, via_dia_mm, drill_mm
          avoid_other_zones=False, avoid_footprints=False, avoid_same_net_pads=False):
     """Where the vias would go, without placing any. Raises RuntimeError with a
     user-facing message when nothing can go anywhere."""
+    from itertools import combinations
+
     from shapely.geometry import Point
+    from shapely.ops import unary_union
     from shapely.prepared import prep
 
     diameter_nm = _from_mm(via_dia_mm)
@@ -373,35 +388,43 @@ def plan(board, via_type, start_layer, end_layer, net_name, via_dia_mm, drill_mm
             ).format(net=net_name, layers=names)
         )
 
-    # Keep the via on the net's copper on every poured layer it passes, since
-    # the barrel connects all of them. Layers in the span where the net is NOT
-    # poured are left to DRC: the barrel passing through another net's copper
-    # there is not checked here.
-    region = region_by_layer[poured[0]]
-    for layer in poured[1:]:
-        region = region.intersection(region_by_layer[layer])
+    # A via goes wherever it stands, whole, on the net's copper on two layers:
+    # any two poured layers of the span for a through via, the two it connects
+    # for every other type. Not the overlap of every poured layer: one small
+    # pour on an inner layer would then confine the whole run to that island.
+    # Where the via passes a layer outside the net's copper there, the track,
+    # pad and (if asked for) zone keepouts are what protect that layer.
+    if via_type == pcbnew.VIATYPE_THROUGH:
+        pairs = list(combinations(poured, 2))
+    else:
+        pairs = [(start_layer, end_layer)]
+    overlaps = [region_by_layer[a].intersection(region_by_layer[b]) for a, b in pairs]
+    overlap = unary_union(overlaps)
 
-    if region.is_empty:
+    if overlap.is_empty:
         raise RuntimeError(_("The selected net's planes do not overlap anywhere on the selected layer span."))
 
+    # Inset each pair's overlap on its own, so the via body stays inside the
+    # fill on both layers of at least one pair.
     inset = via_radius_nm + _from_mm(EDGE_EPS_MM)
-    overlap = region
-    region = region.buffer(-inset)
+    region = unary_union([o.buffer(-inset) for o in overlaps])
     if region.is_empty:
         raise RuntimeError(_("No room for vias after clearance inset. Try a smaller via diameter."))
 
-    minx, miny, maxx, maxy = region.bounds
-    shifted_bounds = (minx + x_offset_nm, miny + y_offset_nm, maxx + x_offset_nm, maxy + y_offset_nm)
     prepared = prep(region)
     allowed = lambda pt: prepared.contains(pt)  # noqa: E731
     candidates = [
-        (x, y) for (x, y) in _grid_points(shifted_bounds, spacing_nm, pattern) if allowed(Point(x, y))
+        (x, y)
+        for (x, y) in _grid_points(region.bounds, spacing_nm, pattern, x_offset_nm, y_offset_nm)
+        if allowed(Point(x, y))
     ]
     if not candidates:
         raise RuntimeError(_("No via positions fit inside the overlap of the planes.\nTry a smaller spacing or via diameter."))
 
     clearances = geo.net_clearances(board, net_name)
-    keepout = geo.via_keepout_shapes(board, via_radius_nm, span_set, _from_mm(HOLE_MARGIN_MM))
+    keepout = geo.via_keepout_shapes(
+        board, via_radius_nm, span_set, _from_mm(HOLE_MARGIN_MM), net_name, clearances
+    )
     keepout += geo.pad_drill_keepout_shapes(board, via_radius_nm, _from_mm(HOLE_MARGIN_MM))
     keepout += geo.pad_copper_keepout_shapes(board, net_name, via_radius_nm, clearances, span_set, avoid_same_net_pads)
     keepout += geo.rule_area_keepout_shapes(zones, via_radius_nm, span_set)
@@ -467,10 +490,14 @@ def stitch(board, via_type, start_layer, end_layer, net_name, via_dia_mm, drill_
     for via in vias:
         board.Add(via)
 
+    number = 1 + max(
+        (_run_number(g.GetName()) for g in board.Groups() if g.GetName().startswith(GROUP_PREFIX)),
+        default=0,
+    )
     group = geo.group_vias(
         board, vias,
         f"{GROUP_PREFIX}{net_name} "
-        f"{board.GetLayerName(start_layer)}:{board.GetLayerName(end_layer)}",
+        f"{board.GetLayerName(start_layer)}:{board.GetLayerName(end_layer)} #{number}",
     )
 
     _refill_zones(board, parent)
@@ -623,7 +650,10 @@ class ViaStitchingDialogLegacy(wx.Dialog):
             (t for t in board.GetTracks() if isinstance(t, pcbnew.PCB_VIA) and t.IsSelected()),
             None,
         )
-        saved = {} if sample_via else _load_settings()
+        # What a selected via says nothing about (the pattern, the avoid
+        # boxes) still comes from the last run; everything else checks
+        # sample_via first.
+        saved = _load_settings()
 
         # --- Via type ---
         via_type_names = list(self.VIA_TYPE_CHOICES.keys())
@@ -664,9 +694,9 @@ class ViaStitchingDialogLegacy(wx.Dialog):
 
         # --- Size fields ---
         if sample_via:
-            via_dia_str = str(_mm(sample_via.GetWidth()))
+            via_dia_str = str(_mm(geo.via_width(sample_via)))
             drill_str = str(_mm(sample_via.GetDrillValue()))
-            spacing_str = str(_mm(sample_via.GetWidth() * 4))
+            spacing_str = str(_mm(geo.via_width(sample_via) * 4))
         elif saved:
             via_dia_str = str(saved.get("via_dia_mm", DEFAULT_VIA_DIAMETER_MM))
             drill_str = str(saved.get("drill_mm", DEFAULT_DRILL_MM))
@@ -686,8 +716,9 @@ class ViaStitchingDialogLegacy(wx.Dialog):
         self.pattern.SetSelection(PATTERNS.index(saved["pattern"]) if saved.get("pattern") in PATTERNS
                                    else PATTERNS.index(DEFAULT_PATTERN))
 
-        x_offset_str = str(saved.get("x_offset_mm", 0.0)) if saved else "0.0"
-        y_offset_str = str(saved.get("y_offset_mm", 0.0)) if saved else "0.0"
+        use_saved = saved and not sample_via
+        x_offset_str = str(saved.get("x_offset_mm", 0.0)) if use_saved else "0.0"
+        y_offset_str = str(saved.get("y_offset_mm", 0.0)) if use_saved else "0.0"
         self.x_offset = wx.TextCtrl(self, value=x_offset_str)
         self.y_offset = wx.TextCtrl(self, value=y_offset_str)
         offset_tip = (
@@ -1039,6 +1070,8 @@ class ViaStitchingDialogLegacy(wx.Dialog):
 
         if not all(math.isfinite(v) for v in (via_dia_mm, drill_mm, spacing_mm)):
             raise ValueError(_("Via diameter, drill and spacing must be real numbers (mm)."))
+        if not all(math.isfinite(v) for v in (x_offset_mm, y_offset_mm)):
+            raise ValueError(_("Via diameter, drill and spacing and offsets must be numbers (mm)."))
 
         # Ported from the IPC dialog's values() -- missing here until now,
         # so a zero/negative size or drill >= diameter reached stitch()
@@ -1091,10 +1124,12 @@ class ViaStitchingDialogLegacy(wx.Dialog):
 
 
 def stitching_runs(board):
-    """Every stitching run still on the board, as (group, its vias). Runs whose
-    vias are all gone are dropped -- an empty group is nothing to remove."""
+    """Every stitching run still on the board, as (group, its vias), oldest
+    first. Runs whose vias are all gone are dropped -- an empty group is
+    nothing to remove."""
     runs = [(g, geo.grouped_vias(board, g)) for g in board.Groups()
             if g.GetName().startswith(GROUP_PREFIX)]
+    runs.sort(key=lambda run: _run_number(run[0].GetName()))
     return [(g, vias) for (g, vias) in runs if vias]
 
 
