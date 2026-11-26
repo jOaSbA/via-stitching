@@ -733,6 +733,30 @@ def _pad_angle_degrees(pad):
         return 0.0
 
 
+def _pad_own_margin(pad):
+    """The larger of a pad's own clearance and solder mask margin overrides, in nm.
+
+    A fiducial is the case this is for: a bare dot with no net, so the netclass
+    lookup only gave it the fallback clearance, and a mask opening well past its
+    copper, so the via ring landed inside the opening. Both ride on the pad
+    itself; 0 when neither is set or kipy can't say.
+    """
+    margin = 0
+    try:
+        if pad.proto.HasField("copper_clearance_override"):
+            margin = pad.proto.copper_clearance_override.value_nm
+    except Exception:
+        pass
+    for side in ("front_outer_layers", "back_outer_layers"):
+        try:
+            mask = getattr(pad.padstack, side).solder_mask_settings.proto
+            if mask.HasField("solder_mask_margin"):
+                margin = max(margin, mask.solder_mask_margin.value_nm)
+        except Exception:
+            pass
+    return margin
+
+
 def _pad_copper_keepout_shapes(board, net_name, via_radius_nm, clearances, span,
                                avoid_same_net_pads=DEFAULT_AVOID_SAME_NET_PADS):
     """Clearance areas around pad copper on the spanned layers.
@@ -776,7 +800,8 @@ def _pad_copper_keepout_shapes(board, net_name, via_radius_nm, clearances, span,
             continue
         if size.x <= 0 or size.y <= 0:
             continue
-        margin = via_radius_nm + (0 if same_net else clearances[pad.net.name])
+        margin = via_radius_nm + max(
+            0 if same_net else clearances[pad.net.name], _pad_own_margin(pad))
         # The copper sits `offset` away from the pad position (the hole), in
         # the pad's own frame, so it turns about the position with it.
         offset = getattr(copper, "offset", None)

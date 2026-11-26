@@ -474,6 +474,22 @@ def graphic_keepout_shapes(board, net_name, via_radius_nm, clearances, span):
     return shapes
 
 
+def pad_own_margin(pad):
+    """The larger of a pad's own clearance and solder mask margin, in nm.
+
+    Same reason as the IPC side: a fiducial has no net and a mask opening well
+    past its copper. KiCad 8 turned both getters into std::optional, which
+    SWIG hands back as None when unset; anything unreadable counts as 0."""
+    margin = 0
+    for getter in ("GetLocalClearance", "GetLocalSolderMaskMargin"):
+        try:
+            value = getattr(pad, getter)()
+            margin = max(margin, int(value or 0))
+        except Exception:
+            pass
+    return margin
+
+
 def pad_copper_keepout_shapes(board, net_name, via_radius_nm, clearances, span,
                                avoid_same_net_pads=False):
     """Clearance areas around pad copper on the spanned layers.
@@ -501,7 +517,8 @@ def pad_copper_keepout_shapes(board, net_name, via_radius_nm, clearances, span,
             size = pad.GetSize()
             if size.x <= 0 or size.y <= 0:
                 continue
-            margin = via_radius_nm + (0 if same_net else clearances[pad.GetNetname()])
+            margin = via_radius_nm + max(
+                0 if same_net else clearances[pad.GetNetname()], pad_own_margin(pad))
             if pad.GetShape() == pcbnew.PAD_SHAPE_CUSTOM:
                 # The size of a custom pad is only its anchor. Its real copper
                 # is the polygon KiCad draws, already rotated and in place.
