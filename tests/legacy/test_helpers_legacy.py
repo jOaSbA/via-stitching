@@ -451,5 +451,31 @@ def run():
     print(f"{len(tests)}/{len(tests)} PASSED")
 
 
+def test_fiducial_keeps_vias_out_of_its_mask_opening():
+    # Regression: a fiducial has no net, so it only got the fallback clearance
+    # from its dot and vias landed inside its mask opening. The pad's own
+    # clearance and mask margin have to count.
+    board = pcbnew.BOARD()
+    fp = pcbnew.FOOTPRINT(board)
+    pad = pcbnew.PAD(fp)
+    pad.SetSize(geo.size(1 * MM, 1 * MM))
+    pad.SetPosition(geo.point(0, 0))
+    pad.SetLayerSet(fixtures.layer_set(pcbnew.F_Cu, pcbnew.F_Mask))
+    fp.Add(pad)
+    board.Add(fp)
+    radius = round(0.3 * MM)
+
+    def reach():
+        shape = geo.pad_copper_keepout_shapes(
+            board, "GND", radius, geo.net_clearances(board, "GND"), [pcbnew.F_Cu, pcbnew.B_Cu])[0]
+        return shape.bounds[2]
+
+    assert abs(reach() - (0.7 * MM + radius)) < 0.01 * MM
+    pad.SetLocalSolderMaskMargin(round(0.5 * MM))
+    assert abs(reach() - (1.0 * MM + radius)) < 0.01 * MM
+    pad.SetLocalClearance(round(0.8 * MM))
+    assert abs(reach() - (1.3 * MM + radius)) < 0.01 * MM
+
+
 if __name__ == "__main__":
     run()

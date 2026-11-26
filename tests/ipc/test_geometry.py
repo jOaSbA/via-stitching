@@ -1279,6 +1279,38 @@ def test_custom_pad_keepout_is_its_real_copper():
     assert len(_pad_copper_keepout_shapes(board, *args)) == 1
 
 
+def test_fiducial_keeps_vias_out_of_its_mask_opening():
+    # Regression: a fiducial has no net, so it only got the 0.2 mm fallback
+    # clearance from its 1 mm dot and vias landed inside its 2 mm mask opening.
+    # The pad's own clearance and mask margin overrides have to count.
+    from types import SimpleNamespace
+
+    from kipy.board_types import Pad
+
+    span = [BoardLayer.BL_F_Cu, BoardLayer.BL_B_Cu]
+    radius = from_mm(0.3)
+    fid = _smd_pad("", from_mm(1.0), from_mm(1.0))
+    real = Pad()
+    fid.proto = real.proto
+    fid.padstack.front_outer_layers = real.padstack.front_outer_layers
+    fid.padstack.back_outer_layers = real.padstack.back_outer_layers
+    board = SimpleNamespace(get_pads=lambda: [fid])
+
+    def reach():
+        shape = _pad_copper_keepout_shapes(board, "GND", radius, _fallback_clearances(), span)[0]
+        return shape.bounds[2]
+
+    assert abs(reach() - (from_mm(0.5 + 0.2) + radius)) < from_mm(0.01)
+
+    mask = real.padstack.front_outer_layers.solder_mask_settings
+    mask.solder_mask_margin = from_mm(0.5)
+    fid.padstack.front_outer_layers = real.padstack.front_outer_layers
+    assert abs(reach() - (from_mm(0.5 + 0.5) + radius)) < from_mm(0.01)
+
+    real.proto.copper_clearance_override.value_nm = from_mm(0.8)
+    assert abs(reach() - (from_mm(0.5 + 0.8) + radius)) < from_mm(0.01)
+
+
 if __name__ == "__main__":
     for name, fn in sorted(globals().items()):
         if name.startswith("test_"):
